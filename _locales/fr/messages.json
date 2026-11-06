@@ -1,0 +1,10 @@
+{
+  "extName": { "message": "Tab Volume Clean" },
+  "extDescription": { "message": "Règle le volume de l'onglet courant de 0 à 600 % par un gain linéaire simple, appels WebRTC compris (BigBlueButton, Jitsi). Mémorisé par site." },
+  "actionTitle": { "message": "Volume de l'onglet" },
+  "unsupported": { "message": "Page non prise en charge" },
+  "localFiles": { "message": "Fichiers locaux" },
+  "reset": { "message": "Remettre à 100 %" },
+  "sliderLabel": { "message": "Volume de l'onglet" },
+  "boostNote": { "message": "Au-delà de 100 %, une source déjà forte peut durcir : baisser jusqu'à ce que le son soit propre." }
+}

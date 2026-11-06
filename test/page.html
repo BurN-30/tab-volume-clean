@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tab Volume Clean test page</title>
+</head>
+<body>
+<h1>Tab Volume Clean test page</h1>
+<p>Three sources: a classic &lt;audio&gt; at 440 Hz, a WebRTC &lt;audio&gt; (srcObject, local RTCPeerConnection loop) at 1000 Hz,
+and a page Web Audio oscillator at 2000 Hz connected to its output. Only run it through test/run.mjs, which mutes the browser.</p>
+<pre id="log"></pre>
+<script>
+const log = (m) => (document.getElementById('log').textContent += m + '\n');
+
+async function startAll() {
+  // 1. Classic <audio>
+  const a = document.createElement('audio');
+  a.src = '/tone.wav';
+  a.loop = true;
+  document.body.append(a);
+  await a.play();
+
+  // 2. WebRTC: oscillator -> MediaStream -> pc1 -> pc2 -> <audio srcObject>
+  const gen = new AudioContext();
+  const osc = gen.createOscillator();
+  osc.frequency.value = 1000;
+  const g = gen.createGain();
+  g.gain.value = 0.1;
+  const dest = gen.createMediaStreamDestination();
+  osc.connect(g).connect(dest);
+  osc.start();
+  const pc1 = new RTCPeerConnection(), pc2 = new RTCPeerConnection();
+  pc1.onicecandidate = (e) => e.candidate && pc2.addIceCandidate(e.candidate);
+  pc2.onicecandidate = (e) => e.candidate && pc1.addIceCandidate(e.candidate);
+  const b = document.createElement('audio');
+  b.id = 'webrtc';
+  document.body.append(b);
+  const gotTrack = new Promise((res) => (pc2.ontrack = (e) => { b.srcObject = e.streams[0]; res(); }));
+  dest.stream.getTracks().forEach((t) => pc1.addTrack(t, dest.stream));
+  await pc1.setLocalDescription(await pc1.createOffer());
+  await pc2.setRemoteDescription(pc1.localDescription);
+  await pc2.setLocalDescription(await pc2.createAnswer());
+  await pc1.setRemoteDescription(pc2.localDescription);
+  await gotTrack;
+  await b.play();
+  window.__pcs = [pc1, pc2];
+
+  // 3. Page Web Audio
+  const ctx = new AudioContext();
+  const o2 = ctx.createOscillator();
+  o2.frequency.value = 2000;
+  const g2 = ctx.createGain();
+  g2.gain.value = 0.25;
+  o2.connect(g2);
+  g2.connect(ctx.destination);
+  o2.start();
+  window.__pageCtx = ctx;
+  log('sources started');
+  return 'ok';
+}
+
+function probe() {
+  return new Promise((resolve) => {
+    let got = null;
+    document.dispatchEvent(new CustomEvent('tab-volume-clean:probe', { detail: { receive: (r) => (got = r) } }));
+    resolve(got);
+  });
+}
+
+// Measures the output of each extension chain: level at the 3 frequencies and peak.
+async function measure() {
+  const p = await probe();
+  if (!p) return { probe: null };
+  const out = { gain: p.gain, active: p.active, chains: [] };
+  for (const c of p.outputs) {
+    const an = c.context.createAnalyser();
+    an.fftSize = 8192;
+    an.smoothingTimeConstant = 0;
+    c.output.connect(an);
+    const sr = c.context.sampleRate;
+    const freq = new Float32Array(an.frequencyBinCount);
+    const time = new Float32Array(an.fftSize);
+    const acc = { 440: [], 1000: [], 2000: [] };
+    let peak = 0;
+    for (let i = 0; i < 12; i++) {
+      await new Promise((r) => setTimeout(r, 60));
+      an.getFloatFrequencyData(freq);
+      an.getFloatTimeDomainData(time);
+      for (const s of time) peak = Math.max(peak, Math.abs(s));
+      for (const f of [440, 1000, 2000]) {
+        const bin = Math.round((f * an.fftSize) / sr);
+        acc[f].push(Math.max(freq[bin - 1], freq[bin], freq[bin + 1]));
+      }
+    }
+    c.output.disconnect(an);
+    const med = (arr) => arr.sort((x, y) => x - y)[arr.length >> 1];
+    out.chains.push({
+      media: c.media,
+      sampleRate: sr,
+      state: c.context.state,
+      dB440: +med(acc[440]).toFixed(1),
+      dB1000: +med(acc[1000]).toFixed(1),
+      dB2000: +med(acc[2000]).toFixed(1),
+      peak: +peak.toFixed(3),
+    });
+  }
+  const b = document.getElementById('webrtc');
+  out.webrtcElement = b ? { paused: b.paused, muted: b.muted, volume: b.volume, hasSrcObject: !!b.srcObject } : null;
+  return out;
+}
+
+// Test relay (only present in the test copy of the extension): writes the value the way the popup does.
+function extSet(percent) {
+  return new Promise((resolve) => {
+    document.addEventListener('tab-volume-clean:test-reply', (e) => resolve(JSON.parse(e.detail)), { once: true });
+    document.dispatchEvent(new CustomEvent('tab-volume-clean:test', { detail: percent === undefined ? null : percent }));
+  });
+}
+
+</script>
+</body>
+</html>

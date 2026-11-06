@@ -1,0 +1,109 @@
+<!doctype html><meta charset="utf-8"><title>bench</title>
+<script>
+// DSP bench: offline rendering (OfflineAudioContext, silent), objective measurements.
+// Candidates: null = plain linear gain; {shaper:true, T} = soft clipper; {threshold, knee, ratio, attack, release, post} = DynamicsCompressorNode.
+const SR = 48000;
+function goertzel(x, f, sr) {
+  const w = 2 * Math.PI * f / sr, c = 2 * Math.cos(w);
+  let s1 = 0, s2 = 0;
+  for (let i = 0; i < x.length; i++) { const s = x[i] + c * s1 - s2; s2 = s1; s1 = s; }
+  return Math.sqrt(s1 * s1 + s2 * s2 - c * s1 * s2) / (x.length / 2);
+}
+function thd(x, f, sr) {
+  const h1 = goertzel(x, f, sr); let p = 0;
+  for (let k = 2; k <= 10; k++) if (f * k < sr / 2) p += goertzel(x, f * k, sr) ** 2;
+  return { h1, thdPct: 100 * Math.sqrt(p) / h1 };
+}
+function voiceLike(len, sr, amp) {
+  // 140 Hz harmonic complex, rough formants, 4 Hz syllabic envelope: close to a video-call voice.
+  const out = new Float32Array(len); let max = 0;
+  for (let i = 0; i < len; i++) {
+    const t = i / sr, f0 = 140 * (1 + 0.05 * Math.sin(2 * Math.PI * 0.7 * t));
+    let v = 0;
+    for (let k = 1; k <= 25; k++) {
+      const fk = f0 * k, form = Math.exp(-((fk - 700) ** 2) / 2e5) + 0.6 * Math.exp(-((fk - 1200) ** 2) / 3e5) + 0.3 * Math.exp(-((fk - 2600) ** 2) / 5e5) + 0.05;
+      v += form * Math.sin(2 * Math.PI * fk * t + k) / Math.sqrt(k);
+    }
+    const env = Math.max(0, Math.sin(2 * Math.PI * 4 * t)) ** 0.7;
+    out[i] = v * env; max = Math.max(max, Math.abs(out[i]));
+  }
+  for (let i = 0; i < len; i++) out[i] *= amp / max;
+  return out;
+}
+async function render(params, gain, input) {
+  const ctx = new OfflineAudioContext(1, input.length, SR);
+  const buf = ctx.createBuffer(1, input.length, SR); buf.copyToChannel(input, 0);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const g = ctx.createGain(); g.gain.value = gain;
+  let last = g;
+  if (params && params.shaper) {
+    // Memoryless soft clipper: identity up to T, then a tanh curve toward 1, never above.
+    const K = params.K || 8, T = params.T || 0.9, N = 65537, curve = new Float32Array(N);
+    for (let i = 0; i < N; i++) { const y = K * (2 * i / (N - 1) - 1), a = Math.abs(y); curve[i] = Math.sign(y) * (a <= T ? a : T + (1 - T) * Math.tanh((a - T) / (1 - T))); }
+    g.gain.value = gain / K;
+    const ws = ctx.createWaveShaper(); ws.curve = curve; ws.oversample = params.oversample || 'none';
+    g.connect(ws); last = ws;
+  } else if (params) {
+    const c = ctx.createDynamicsCompressor();
+    for (const k of ['threshold', 'knee', 'ratio', 'attack', 'release']) c[k].value = params[k];
+    g.connect(c); last = c;
+    if (params.post) { const p = ctx.createGain(); p.gain.value = params.post; c.connect(p); last = p; }
+  }
+  src.connect(g); last.connect(ctx.destination); src.start();
+  return (await ctx.startRendering()).getChannelData(0);
+}
+const sine = (f, a, sec) => { const n = sec * SR, x = new Float32Array(n); for (let i = 0; i < n; i++) x[i] = a * Math.sin(2 * Math.PI * f * i / SR); return x; };
+const peak = x => x.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+const db = v => (20 * Math.log10(v)).toFixed(2);
+const tail = x => x.subarray(x.length - SR);
+async function run(cands) {
+  const res = {};
+  const voice = voiceLike(SR * 4, SR, 0.89); // peaks at -1 dBFS, like an already normalised call
+  for (const [name, p] of Object.entries(cands)) {
+    const r = {};
+    if (p && p.post === 'auto' && !p.shaper) { const l0 = await render({ ...p, post: 0 }, 1, sine(1000, 0.0316, 2)); p.post = 0.0316 / thd(tail(l0), 1000, SR).h1; r.post_dB = db(p.post); }
+    // Transparency at 100% on a quiet signal (-30 dBFS): actual gain added by the chain
+    const lo = await render(p, 1, sine(1000, 0.0316, 2)); r.gain_100pct_low_dB = db(thd(tail(lo), 1000, SR).h1 / 0.0316);
+    // 100% on a voice peaking at -1 dBFS: the chain should be neutral
+    const v1 = await render(p, 1, voice); r.voice100_peak_dBFS = db(peak(v1));
+    for (const g of [2, 4, 5, 8]) {
+      for (const f of [100, 1000]) {
+        const y = await render(p, g, sine(f, 0.5, 3)); const t = thd(tail(y), f, SR);
+        r[`sine${f}_x${g}_THDpct`] = t.thdPct.toFixed(3); r[`sine${f}_x${g}_peak_dBFS`] = db(peak(y.subarray(SR)));
+      }
+      const v = await render(p, g, voice); r[`voice_x${g}_peak_dBFS`] = db(peak(v));
+      let rms = 0; for (const s of v) rms += s * s; r[`voice_x${g}_rms_dB`] = db(Math.sqrt(rms / v.length));
+      let clip = 0; for (const s of v) if (Math.abs(s) > 1) clip++; r[`voice_x${g}_samples_over_0dBFS`] = clip;
+    }
+    res[name] = r;
+  }
+  return res;
+}
+// Comparison with a plain linear gain (tabCapture-style extensions: GainNode then output, hard clipped at ±1 by the system).
+async function compare(p, amps, gains) {
+  const out = [];
+  for (const amp of amps) {
+    const voice = voiceLike(SR * 4, SR, amp);
+    for (const g of gains) {
+      const plain = await render(null, g, voice);
+      if (p.post === 'auto' && !p.shaper) { const l0 = await render({ ...p, post: 0 }, 1, sine(1000, 0.0316, 2)); p.post = 0.0316 / thd(tail(l0), 1000, SR).h1; }
+      const ours = await render(p, g, voice);
+      let clipped = 0;
+      for (const s of plain) if (Math.abs(s) > 1) clipped++;
+      // A compressor delays the sound by a few ms (look-ahead): align before comparing.
+      let lag = 0, best = -Infinity;
+      for (let L = 0; L < 600; L++) { let c = 0; for (let i = SR; i < SR + 20000; i++) c += plain[i] * ours[i + L]; if (c > best) { best = c; lag = L; } }
+      const blk = SR / 50; let maxBlkDiff = 0;
+      for (let s = SR; s + blk + lag < plain.length; s += blk) {
+        let a = 0, b = 0;
+        for (let i = s; i < s + blk; i++) { const vm = Math.max(-1, Math.min(1, plain[i])); a += vm * vm; b += ours[i + lag] ** 2; }
+        if (a / blk > 1e-6) maxBlkDiff = Math.max(maxBlkDiff, Math.abs(10 * Math.log10(b / a)));
+      }
+      out.push({ source_peak_dBFS: db(amp), gain_pct: g * 100, plain_gain_clipped_samples: clipped, delay_ms: (lag / SR * 1000).toFixed(1), max_level_diff_dB: maxBlkDiff.toFixed(2), our_peak_dBFS: db(peak(ours)) });
+    }
+  }
+  return out;
+}
+window.runCompare = compare;
+window.runBench = run;
+</script>

@@ -1,0 +1,10 @@
+{
+  "extName": { "message": "Tab Volume Clean" },
+  "extDescription": { "message": "Set the current tab's volume from 0 to 600% with a plain linear gain, including WebRTC calls (BigBlueButton, Jitsi). Remembered per site." },
+  "actionTitle": { "message": "Tab volume" },
+  "unsupported": { "message": "This page is not supported" },
+  "localFiles": { "message": "Local files" },
+  "reset": { "message": "Reset to 100%" },
+  "sliderLabel": { "message": "Tab volume" },
+  "boostNote": { "message": "Above 100%, a loud source may sound harsh: lower the value until it is clean." }
+}

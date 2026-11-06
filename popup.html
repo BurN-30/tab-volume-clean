@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tab Volume Clean</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <div class="site" id="site">…</div>
+    <div class="row">
+      <input type="range" id="slider" min="0" max="600" step="5" value="100">
+      <output id="value" for="slider">100%</output>
+    </div>
+    <div class="row actions">
+      <button type="button" id="reset"></button>
+    </div>
+    <p class="note" id="note"></p>
+  </main>
+  <script src="common.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

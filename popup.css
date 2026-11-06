@@ -1,0 +1,73 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1d1d1f;
+  --muted: #6b6b70;
+  --accent: #2f6fde;
+  --border: #d5d5da;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f1f23;
+    --fg: #ececf0;
+    --muted: #9a9aa3;
+    --accent: #6ea0ff;
+    --border: #3a3a42;
+  }
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 system-ui, sans-serif;
+}
+main {
+  width: 260px;
+  padding: 12px 14px;
+}
+.site {
+  font-weight: 600;
+  margin-bottom: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+output {
+  min-width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.actions {
+  margin-top: 10px;
+}
+button {
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+button:hover {
+  border-color: var(--accent);
+}
+.note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 1em;
+}
+.note:empty {
+  display: none;
+}

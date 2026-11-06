@@ -1,6 +1,6 @@
 {
   "name": "tab-volume-clean",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Firefox/Zen extension: per-tab volume from 0 to 600% with a plain linear gain, WebRTC included",
   "license": "PolyForm-Noncommercial-1.0.0",

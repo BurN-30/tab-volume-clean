@@ -35,6 +35,10 @@ Tab Volume Clean keeps the processing as close as possible to the plain linear g
 
 ## Install
 
+**One click:** open [the latest signed release](https://github.com/BurN-30/tab-volume-clean/releases/latest/download/tab-volume-clean.xpi) in Firefox, Zen or LibreWolf and confirm. The file is signed by Mozilla, so no `about:config` change is needed. A listing on addons.mozilla.org is pending review.
+
+### Other ways
+
 The extension is not on addons.mozilla.org. Get `tab-volume-clean-<version>.xpi` from the Releases page, or build it yourself (see [Development](#development)).
 
 ### Zen, LibreWolf, Firefox Developer Edition / Nightly / ESR (unsigned install)

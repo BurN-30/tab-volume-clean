@@ -6,8 +6,9 @@
 </head>
 <body>
 <h1>Tab Volume Clean test page</h1>
-<p>Three sources: a classic &lt;audio&gt; at 440 Hz, a WebRTC &lt;audio&gt; (srcObject, local RTCPeerConnection loop) at 1000 Hz,
-and a page Web Audio oscillator at 2000 Hz connected to its output. Only run it through test/run.mjs, which mutes the browser.</p>
+<p>Sources: a classic &lt;audio&gt; at 440 Hz, a WebRTC &lt;audio&gt; (srcObject, local RTCPeerConnection loop) at 1000 Hz,
+a page Web Audio oscillator at 2000 Hz and a left-only one at 3000 Hz connected to its output, and a speech-like
+source (300 Hz, 4 Hz syllables) in its own AudioContext for Normalize. Only run it through test/run.mjs, which mutes the browser.</p>
 <pre id="log"></pre>
 <script>
 const log = (m) => (document.getElementById('log').textContent += m + '\n');
@@ -54,9 +55,88 @@ async function startAll() {
   o2.connect(g2);
   g2.connect(ctx.destination);
   o2.start();
+  // Left channel only, for Mono: the right channel stays silent until Mono mixes the two.
+  const o3 = ctx.createOscillator();
+  o3.frequency.value = 3000;
+  const g3 = ctx.createGain();
+  g3.gain.value = 0.05;
+  const merger = ctx.createChannelMerger(2);
+  o3.connect(g3).connect(merger, 0, 0);
+  merger.connect(ctx.destination);
+  o3.start();
   window.__pageCtx = ctx;
   log('sources started');
   return 'ok';
+}
+
+// Speech-like source: 300 Hz tone with a full-depth 4 Hz envelope (syllables and gaps), peak amplitude "level".
+function startVoice(level) {
+  const ctx = new AudioContext();
+  const o = ctx.createOscillator();
+  o.frequency.value = 300;
+  const g = ctx.createGain();
+  g.gain.value = level / 2;
+  const lfo = ctx.createOscillator();
+  lfo.frequency.value = 4;
+  const depth = ctx.createGain();
+  depth.gain.value = level / 2;
+  lfo.connect(depth).connect(g.gain);
+  o.connect(g).connect(ctx.destination);
+  o.start();
+  lfo.start();
+  window.__voice = { ctx, g, depth };
+  return ctx.state;
+}
+function setVoice(level) {
+  const v = window.__voice;
+  const t = v.ctx.currentTime;
+  for (const p of [v.g.gain, v.depth.gain]) {
+    p.cancelScheduledValues(t);
+    p.setValueAtTime(level / 2, t);
+  }
+}
+async function voiceGain() {
+  const p = await probe();
+  const c = p && p.outputs.find((o) => o.context === window.__voice.ctx);
+  return c ? { layout: c.layout, normDb: c.normDb } : null;
+}
+
+// Level of the right channel at 3000 Hz on the page chain (the up-mix copies a mono output to both sides).
+async function rightLevel() {
+  const p = await probe();
+  const c = p.outputs.find((o) => o.context === window.__pageCtx);
+  const ctx = c.context;
+  // Up-mix to stereo like the output does (a mono signal goes to both sides), then take the right channel.
+  const up = ctx.createGain();
+  up.channelCount = 2;
+  up.channelCountMode = 'explicit';
+  up.channelInterpretation = 'speakers';
+  const sp = ctx.createChannelSplitter(2);
+  up.connect(sp);
+  const an = ctx.createAnalyser();
+  an.fftSize = 8192;
+  an.smoothingTimeConstant = 0;
+  c.output.connect(up);
+  sp.connect(an, 1);
+  const freq = new Float32Array(an.frequencyBinCount);
+  const vals = [];
+  for (let i = 0; i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 60));
+    an.getFloatFrequencyData(freq);
+    const bin = Math.round((3000 * an.fftSize) / ctx.sampleRate);
+    vals.push(Math.max(freq[bin - 1], freq[bin], freq[bin + 1]));
+  }
+  c.output.disconnect(up);
+  vals.sort((a, b) => a - b);
+  return { layout: c.layout, mono: c.mono, dB: +vals[vals.length >> 1].toFixed(1) };
+}
+
+// Level meter as the popup reads it: test background -> tabs.sendMessage -> bridge.js -> hook.js.
+function extMeter() {
+  return new Promise((resolve) => {
+    document.addEventListener('tab-volume-clean:test-meter-reply', (e) => resolve(JSON.parse(e.detail)), { once: true });
+    document.dispatchEvent(new CustomEvent('tab-volume-clean:test-meter'));
+  });
 }
 
 function probe() {
@@ -71,7 +151,7 @@ function probe() {
 async function measure() {
   const p = await probe();
   if (!p) return { probe: null };
-  const out = { gain: p.gain, active: p.active, chains: [] };
+  const out = { gain: p.gain, active: p.active, enabled: p.enabled, layout: p.outputs.map((o) => o.layout), chains: [] };
   for (const c of p.outputs) {
     const an = c.context.createAnalyser();
     an.fftSize = 8192;
@@ -80,14 +160,14 @@ async function measure() {
     const sr = c.context.sampleRate;
     const freq = new Float32Array(an.frequencyBinCount);
     const time = new Float32Array(an.fftSize);
-    const acc = { 440: [], 1000: [], 2000: [] };
+    const acc = { 440: [], 1000: [], 2000: [], 3000: [] };
     let peak = 0;
     for (let i = 0; i < 12; i++) {
       await new Promise((r) => setTimeout(r, 60));
       an.getFloatFrequencyData(freq);
       an.getFloatTimeDomainData(time);
       for (const s of time) peak = Math.max(peak, Math.abs(s));
-      for (const f of [440, 1000, 2000]) {
+      for (const f of [440, 1000, 2000, 3000]) {
         const bin = Math.round((f * an.fftSize) / sr);
         acc[f].push(Math.max(freq[bin - 1], freq[bin], freq[bin + 1]));
       }
@@ -101,6 +181,8 @@ async function measure() {
       dB440: +med(acc[440]).toFixed(1),
       dB1000: +med(acc[1000]).toFixed(1),
       dB2000: +med(acc[2000]).toFixed(1),
+      dB3000: +med(acc[3000]).toFixed(1),
+      layout: c.layout,
       peak: +peak.toFixed(3),
     });
   }
@@ -109,11 +191,13 @@ async function measure() {
   return out;
 }
 
-// Test relay (only present in the test copy of the extension): writes the value the way the popup does.
-function extSet(percent) {
+// Test relay (only present in the test copy of the extension): writes a setting the way the popup does,
+// or runs a keyboard shortcut. extSet(150) sets the volume, extSet('normalize', true) another setting.
+function extSet(name, value) {
+  const msg = typeof name === 'number' ? { name: 'gain', value: name / 100 } : name === 'command' ? { command: value } : { name, value };
   return new Promise((resolve) => {
     document.addEventListener('tab-volume-clean:test-reply', (e) => resolve(JSON.parse(e.detail)), { once: true });
-    document.dispatchEvent(new CustomEvent('tab-volume-clean:test', { detail: percent === undefined ? null : percent }));
+    document.dispatchEvent(new CustomEvent('tab-volume-clean:test', { detail: JSON.stringify(msg) }));
   });
 }
 

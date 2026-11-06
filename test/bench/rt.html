@@ -1,0 +1,65 @@
+<!doctype html><meta charset="utf-8"><title>realtime bench</title>
+<script src="scenario.js"></script>
+<script>
+// Real-time bench page: plays the scenario through a page AudioContext (Web Audio, routed by the extension).
+// tap.js mirrors what the extension sends to the output into a GainNode, recorded here by an AudioWorklet
+// that has no output. Only run through test/bench/realtime.mjs (mock audio device, volume 0).
+let ctx, scn;
+const chunks = [];
+async function prepare() {
+  ctx = new AudioContext();
+  await ctx.resume();
+  await ctx.audioWorklet.addModule('/rec.js');
+  const rec = new AudioWorkletNode(ctx, 'rec', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: 'explicit' });
+  rec.port.onmessage = (e) => chunks.push(e.data);
+  window.__tapConnect(window.__tapMix(ctx), rec);
+  window.__rec = rec;
+  scn = scnBuild(ctx.sampleRate);
+  return { sampleRate: ctx.sampleRate, seconds: scn.x.length / ctx.sampleRate, state: ctx.state };
+}
+let f0 = 0;
+function play() {
+  const buf = ctx.createBuffer(1, scn.x.length, ctx.sampleRate);
+  buf.copyToChannel(scn.x, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  const t0 = Math.ceil((ctx.currentTime + 0.5) * ctx.sampleRate) / ctx.sampleRate;
+  f0 = Math.round(t0 * ctx.sampleRate);
+  src.start(t0);
+  return t0;
+}
+// True once the context clock has passed the end of the scenario (the mock device may run slower than real time).
+function done() {
+  return ctx.currentTime * ctx.sampleRate > f0 + scn.x.length + ctx.sampleRate;
+}
+function collect() {
+  const sr = ctx.sampleRate;
+  const n = scn.x.length;
+  const PAD = 19200;
+  const raw = new Float32Array(n + 2 * PAD); // raw[PAD] = sample played at t0
+  let got = 0;
+  let gaps = 0;
+  let prev = null;
+  for (const c of chunks) {
+    if (prev !== null && c.start !== prev) gaps++;
+    prev = c.start + c.d.length;
+    for (let i = 0; i < c.d.length; i++) {
+      const j = c.start - f0 + PAD + i;
+      if (j >= 0 && j < raw.length) {
+        raw[j] = c.d[i];
+        if (j >= PAD && j < PAD + n) got++;
+      }
+    }
+  }
+  // Remaining offset (a compressor's look-ahead, for example) found by correlation.
+  const a = scn.segments.find((s) => s.name === 'A loud');
+  const lag = scnLag(scn.x, raw.subarray(PAD), a.start + Math.round(0.5 * sr), 9600);
+  const y = raw.slice(PAD + lag, PAD + lag + n);
+  const res = scnAnalyse(scn, y);
+  res.summary.delay_ms = +((lag / sr) * 1000).toFixed(1);
+  res.summary.recorded_pct = +((100 * Math.min(got, n)) / n).toFixed(1);
+  res.summary.recorder_gaps = gaps;
+  return res;
+}
+</script>

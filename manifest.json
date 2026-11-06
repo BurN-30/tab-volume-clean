@@ -1,35 +1,82 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extName__",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "__MSG_extDescription__",
   "default_locale": "en",
   "icons": {
     "48": "icons/icon.svg",
     "96": "icons/icon.svg"
   },
-  "permissions": ["storage", "activeTab"],
-  "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "file:///*"
+  ],
   "background": {
-    "scripts": ["common.js", "background.js"]
+    "scripts": [
+      "common.js",
+      "background.js"
+    ]
   },
   "action": {
     "default_title": "__MSG_actionTitle__",
     "default_icon": "icons/icon.svg",
     "default_popup": "popup.html"
   },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "volume-up": {
+      "suggested_key": {
+        "default": "Alt+Shift+Up"
+      },
+      "description": "__MSG_cmdUp__"
+    },
+    "volume-down": {
+      "suggested_key": {
+        "default": "Alt+Shift+Down"
+      },
+      "description": "__MSG_cmdDown__"
+    },
+    "toggle-mute": {
+      "suggested_key": {
+        "default": "Alt+Shift+M"
+      },
+      "description": "__MSG_cmdMute__"
+    }
+  },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*", "file:///*"],
-      "js": ["hook.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*",
+        "file:///*"
+      ],
+      "js": [
+        "hook.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
       "match_about_blank": true,
       "world": "MAIN"
     },
     {
-      "matches": ["http://*/*", "https://*/*", "file:///*"],
-      "js": ["common.js", "bridge.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*",
+        "file:///*"
+      ],
+      "js": [
+        "common.js",
+        "bridge.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
       "match_about_blank": true
@@ -40,7 +87,9 @@
       "id": "tab-volume-clean@burn-30",
       "strict_min_version": "142.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   }

@@ -1,6 +1,8 @@
 // Audio engine, runs in the page world at document_start.
 //
 // Chain: source -> GainNode (0 to 6, linear) -> WaveShaperNode (soft clipper) -> output.
+// With Normalize: source -> GainNode -> leveler GainNode -> WaveShaperNode -> output,
+// plus a side chain (filters and analysers) that only measures, never feeds the output.
 //
 // The gain is a plain linear multiplier, like extensions built on Chrome's tabCapture
 // (capture -> GainNode -> output). Firefox has no tab capture API, so the audio is taken
@@ -8,15 +10,17 @@
 // up to -0.9 dBFS (bit-for-bit the same as a plain gain), then bends smoothly toward 1.0, so
 // samples that a plain gain would hard-clip at the sound card are rounded off instead.
 // It has no memory: no pumping, no level change on quiet passages, no added latency.
+// There is no compressor anywhere: the volume changes the level, never the timbre.
 //
 // The AudioContext is created without a sampleRate, so it runs at the device's native rate.
 //
-// Nothing is touched while a site is at 100%: no AudioContext, no captured element.
-// Once another value arrives, the extension captures:
+// Nothing is touched while a site is at its defaults (100%, Normalize and Mono off): no AudioContext,
+// no captured element. Once another value arrives, the extension captures:
 //   - classic <audio>/<video> elements and those playing a MediaStream (srcObject, WebRTC:
 //     BigBlueButton, Jitsi...), through createMediaElementSource, which follows the element
 //     even when the page swaps its stream;
 //   - audio the page makes itself with Web Audio: its connections to the output go through the chain.
+// When the extension is turned off for the site, the chains switch to a plain pass-through (gain 1).
 (() => {
   "use strict";
 
@@ -53,19 +57,174 @@
   const BAC = window.BaseAudioContext ? BaseAudioContext.prototype : AC.prototype;
   const createGain = BAC.createGain;
   const createWaveShaper = BAC.createWaveShaper;
+  const createBiquad = BAC.createBiquadFilter;
+  const createAnalyser = BAC.createAnalyser;
+  const readTimeDomain = AnalyserNode.prototype.getFloatTimeDomainData;
   const createMediaElementSource = AC.prototype.createMediaElementSource;
   const getDestination = Object.getOwnPropertyDescriptor(BAC, "destination").get;
   const getContext = Object.getOwnPropertyDescriptor(P, "context").get;
+  const getCurrentTime = Object.getOwnPropertyDescriptor(BAC, "currentTime").get;
   const OfflineAC = window.OfflineAudioContext;
   const DestinationNode = window.AudioDestinationNode;
+  const setTimer = window.setInterval.bind(window);
+  const clearTimer = window.clearInterval.bind(window);
+  const now = () => performance.now();
 
+  // Site settings, sent by bridge.js.
   let gain = 1;
+  let normalize = false;
+  let mono = false;
+  let enabled = true;
   let active = false;
 
   const ownNodes = new WeakSet();
   const chains = new WeakMap(); // AudioContext -> chain
   const chainList = new Set(); // WeakRef<chain>
   let mediaContext = null;
+
+  // ---------- Normalize: speech leveler ----------
+  // ---- leveler:begin (pure code, also loaded by test/bench: keep it self-contained) ----
+  // Slow automatic gain for speech, run every ~50 ms on the source level (before the volume).
+  // Input: mean square of a weighted block (100 Hz high-pass, +4 dB above 1.5 kHz) and raw peak.
+  // - Gate: a block is speech only above -50 dBFS and 10 dB above the noise floor (lowest block of the
+  //   last half second). Pauses, breaths and steady background noise never raise the gain: a new steady
+  //   noise passes the gate for half a second at most, too little to move the level (75th percentile).
+  // - Level: 75th percentile of the speech blocks of a sliding window (the last 30 speech blocks, none older
+  //   than 2.5 s). It ignores the dips between syllables, so the gain does not follow them (no pumping),
+  //   and a new speaker replaces the previous one within about a second.
+  // - Gain: target minus level, from -12 to +12 dB. It rises slowly (time constant 0.5 s, at most 8 dB/s)
+  //   and falls faster (0.15 s). Its boost never pushes the source's recent peaks above -1 dBFS.
+  // - Long pause (over 1 s): a boost relaxes toward 0 dB at 2 dB/s, a cut stays. So the gain never climbs
+  //   in a silence, and a loud voice after a long pause does not start with the boost of a quiet one.
+  function createLeveler() {
+    const TARGET = -20; // dB, weighted level of speech blocks
+    const MAX_BOOST = 12;
+    const MAX_CUT = 12;
+    const CEILING = -1; // dBFS, peak limit for the boost
+    const GATE = -50; // dBFS
+    const ABOVE_FLOOR = 10; // dB
+    const FLOOR_BLOCKS = 10; // half a second
+    const LEVEL_BLOCKS = 20; // about 1 s of speech
+    const LEVEL_AGE = 2.5; // s
+    const UP_TAU = 0.5; // s
+    const UP_RATE = 8; // dB per second
+    const DOWN_TAU = 0.15; // s
+    const PEAK_FALL = 6; // dB per second
+    const HOLD = 1; // s
+    const RELAX = 2; // dB per second
+    const toDb = (p) => 10 * Math.log10(p + 1e-12);
+    const recent = [];
+    const speech = [];
+    let peakEnv = -Infinity;
+    let pause = 0;
+    let clock = 0;
+    let g = 0;
+    return {
+      get gainDb() {
+        return g;
+      },
+      step(meanSquare, peak, dt) {
+        clock += dt;
+        const lvl = toDb(meanSquare);
+        const pk = toDb(peak * peak);
+        recent.push(lvl);
+        if (recent.length > FLOOR_BLOCKS) recent.shift();
+        let floor = Infinity;
+        for (const v of recent) if (v < floor) floor = v;
+        peakEnv = Math.max(pk, peakEnv - PEAK_FALL * dt);
+        if (lvl > GATE && lvl > floor + ABOVE_FLOOR) {
+          pause = 0;
+          speech.push({ t: clock, lvl });
+          while (speech.length > LEVEL_BLOCKS || clock - speech[0].t > LEVEL_AGE) speech.shift();
+          const sorted = speech.map((b) => b.lvl).sort((a, b) => a - b);
+          const level = sorted[Math.floor(0.7 * (sorted.length - 1))];
+          let want = Math.max(-MAX_CUT, Math.min(MAX_BOOST, TARGET - level));
+          want = Math.min(want, Math.max(0, CEILING - peakEnv));
+          if (want > g) g += Math.min((want - g) * (1 - Math.exp(-dt / UP_TAU)), UP_RATE * dt);
+          else g += (want - g) * (1 - Math.exp(-dt / DOWN_TAU));
+        } else {
+          pause += dt;
+          if (pause > HOLD && g > 0) g = Math.max(0, g - RELAX * dt);
+        }
+        // Whatever the gate says, a boost never pushes the current peak above the ceiling.
+        if (g > 0) g = Math.min(g, Math.max(0, CEILING - pk));
+        return g;
+      },
+    };
+  }
+  // ---- leveler:end ----
+
+  const BLOCK = 2048; // analysed samples per step (43 ms at 48 kHz)
+  const STEP_MS = 50;
+  let levelTimer = null;
+
+  function addLeveler(chain) {
+    const ctx = chain.ctx;
+    const node = createGain.call(ctx);
+    const hp = createBiquad.call(ctx);
+    hp.type = "highpass";
+    hp.frequency.value = 100;
+    hp.Q.value = Math.SQRT1_2;
+    const shelf = createBiquad.call(ctx);
+    shelf.type = "highshelf";
+    shelf.frequency.value = 1500;
+    shelf.gain.value = 4;
+    const raw = createAnalyser.call(ctx);
+    const weighted = createAnalyser.call(ctx);
+    raw.fftSize = BLOCK;
+    weighted.fftSize = BLOCK;
+    for (const n of [node, hp, shelf, raw, weighted]) ownNodes.add(n);
+    nativeConnect.call(hp, shelf);
+    nativeConnect.call(shelf, weighted);
+    chain.norm = {
+      node,
+      hp,
+      raw,
+      weighted,
+      leveler: createLeveler(),
+      bufRaw: new Float32Array(BLOCK),
+      bufW: new Float32Array(BLOCK),
+      last: now(),
+    };
+  }
+
+  function levelStep() {
+    let any = false;
+    for (const ref of chainList) {
+      const chain = ref.deref();
+      const n = chain && chain.norm;
+      if (!n || chain.ctx.state === "closed") continue;
+      any = true;
+      const t = now();
+      const dt = Math.max(0.01, Math.min(0.25, (t - n.last) / 1000));
+      n.last = t;
+      if (chain.ctx.state !== "running" || gain <= 0) continue;
+      readTimeDomain.call(n.raw, n.bufRaw);
+      readTimeDomain.call(n.weighted, n.bufW);
+      // The side chain sees the signal after the volume GainNode: undo the volume to measure the source.
+      const k = RANGE / gain;
+      let peak = 0;
+      let sum = 0;
+      for (let i = 0; i < BLOCK; i++) {
+        const a = Math.abs(n.bufRaw[i]);
+        if (a > peak) peak = a;
+        sum += n.bufW[i] * n.bufW[i];
+      }
+      const before = n.leveler.gainDb;
+      const g = n.leveler.step((sum / BLOCK) * k * k, peak * k, dt);
+      if (g !== before) {
+        try {
+          n.node.gain.setTargetAtTime(Math.pow(10, g / 20), getCurrentTime.call(chain.ctx), g < before ? 0.01 : 0.03);
+        } catch (e) {
+          // ignored
+        }
+      }
+    }
+    if (!any && levelTimer !== null) {
+      clearTimer(levelTimer);
+      levelTimer = null;
+    }
+  }
 
   // ---------- Processing chain ----------
 
@@ -76,18 +235,78 @@
     const shaper = createWaveShaper.call(ctx);
     shaper.curve = CURVE;
     shaper.oversample = "none"; // oversampling filters would colour the signal below the knee
-    input.gain.value = gain / RANGE;
-    nativeConnect.call(input, shaper);
-    nativeConnect.call(shaper, getDestination.call(ctx));
+    input.gain.value = enabled ? gain / RANGE : 1;
     ownNodes.add(input);
     ownNodes.add(shaper);
-    chain = { ctx, input, output: shaper };
+    chain = { ctx, input, shaper, output: shaper, norm: null, layout: "", meter: null };
     chains.set(ctx, chain);
     chainList.add(new WeakRef(chain));
+    wire(chain);
     return chain;
   }
 
-  function applyGainToChains() {
+  // Connects the chain for the current settings. Only touches the graph when the layout changes.
+  // Off for the site: input (gain 1) -> output, nothing else.
+  // Defaults: input -> shaper -> output, exactly as in 1.1.1.
+  function wire(chain) {
+    const useNorm = enabled && normalize;
+    const layout = !enabled ? "bypass" : useNorm ? "norm" : "plain";
+    const { ctx, input, shaper } = chain;
+    // Mono: the volume GainNode mixes its input down to one channel (L + R) / 2, the output plays it on both sides.
+    // Off: back to the GainNode defaults (2 channels, "max"), so the stream is untouched.
+    const wantMono = enabled && mono;
+    if (wantMono !== (input.channelCountMode === "explicit")) {
+      input.channelCount = wantMono ? 1 : 2;
+      input.channelCountMode = wantMono ? "explicit" : "max";
+    }
+    if (layout === chain.layout) return;
+    if (useNorm && !chain.norm) addLeveler(chain);
+    const dest = getDestination.call(ctx);
+    // Connect the new path first, then remove the old one, so the sound is never cut.
+    let out;
+    if (layout === "bypass") {
+      nativeConnect.call(input, dest);
+      out = input;
+    } else if (layout === "plain") {
+      nativeConnect.call(input, shaper);
+      out = shaper;
+    } else {
+      const n = chain.norm;
+      nativeConnect.call(n.node, shaper);
+      nativeConnect.call(input, n.node);
+      nativeConnect.call(input, n.raw);
+      nativeConnect.call(input, n.hp);
+      out = shaper;
+    }
+    if (out === shaper && chain.layout !== "plain" && chain.layout !== "norm") nativeConnect.call(shaper, dest);
+    const tryOff = (a, b) => {
+      try {
+        nativeDisconnect.call(a, b);
+      } catch (e) {
+        // not connected
+      }
+    };
+    if (layout !== "bypass") tryOff(input, dest);
+    if (layout !== "plain") tryOff(input, shaper);
+    if (layout === "bypass") tryOff(shaper, dest);
+    if (layout !== "norm" && chain.norm) {
+      const n = chain.norm;
+      tryOff(input, n.node);
+      tryOff(input, n.raw);
+      tryOff(input, n.hp);
+      tryOff(n.node, shaper);
+      chain.norm = null; // the next Normalize starts from a fresh leveler
+    }
+    if (chain.meter) {
+      tryOff(chain.output, chain.meter.node);
+      nativeConnect.call(out, chain.meter.node);
+    }
+    chain.output = out;
+    chain.layout = layout;
+    if (layout === "norm" && levelTimer === null) levelTimer = setTimer(levelStep, STEP_MS);
+  }
+
+  function applyToChains() {
     for (const ref of chainList) {
       const chain = ref.deref();
       if (!chain || chain.ctx.state === "closed") {
@@ -95,13 +314,19 @@
         continue;
       }
       const param = chain.input.gain;
-      const t = chain.ctx.currentTime;
+      const t = getCurrentTime.call(chain.ctx);
+      const target = enabled ? gain / RANGE : 1;
       try {
         param.cancelScheduledValues(t);
         param.setValueAtTime(param.value, t);
-        param.setTargetAtTime(gain / RANGE, t, 0.015); // smooth change, no click
+        param.setTargetAtTime(target, t, 0.015); // smooth change, no click
       } catch (e) {
-        param.value = gain / RANGE;
+        param.value = target;
+      }
+      try {
+        wire(chain);
+      } catch (e) {
+        // the previous layout stays
       }
     }
   }
@@ -254,7 +479,7 @@
   function applyFallback(el) {
     if (!fallback.has(el)) fallback.set(el, el.volume);
     try {
-      el.volume = Math.max(0, Math.min(1, fallback.get(el) * Math.min(1, gain)));
+      el.volume = Math.max(0, Math.min(1, fallback.get(el) * (enabled ? Math.min(1, gain) : 1)));
     } catch (e) {
       // ignored
     }
@@ -283,6 +508,7 @@
       applyFallback(el);
       return;
     }
+    if (!enabled) return; // turned off for the site: elements not captured yet stay untouched
     const ctx = getMediaContext();
     // Never capture into a context that is not running: the element would go silent.
     if (ctx.state !== "running") return;
@@ -314,21 +540,90 @@
     }
   }
 
-  // ---------- Value sent by the isolated content script ----------
+  // ---------- Settings sent by the isolated content script ----------
 
-  document.addEventListener("tab-volume-clean:gain", (e) => {
-    const g = Number(e.detail);
-    if (!Number.isFinite(g)) return;
-    gain = Math.max(0, Math.min(MAX_GAIN, g));
-    if (gain !== 1) active = true;
+  document.addEventListener("tab-volume-clean:settings", (e) => {
+    let s;
+    try {
+      s = JSON.parse(String(e.detail));
+    } catch (err) {
+      return;
+    }
+    if (!s || typeof s !== "object") return;
+    const g = Number(s.gain);
+    gain = Number.isFinite(g) ? Math.max(0, Math.min(MAX_GAIN, g)) : 1;
+    normalize = s.normalize === true;
+    mono = s.mono === true;
+    enabled = s.enabled !== false;
+    if (enabled && (gain !== 1 || normalize || mono)) active = true;
     if (!active) return;
-    applyGainToChains();
-    routeRecordedLinks();
-    attachAll();
+    applyToChains();
+    if (enabled) {
+      routeRecordedLinks();
+      attachAll();
+    }
     for (const ref of mediaList) {
       const el = ref.deref();
       if (el && fallback.has(el)) applyFallback(el);
     }
+  });
+
+  // ---------- Level meter for the popup ----------
+  // An analyser is added on the chain output only while the popup asks for levels, removed 3 s after.
+
+  let meterTimer = null;
+  let meterAsked = 0;
+
+  function readMeter() {
+    meterAsked = now();
+    let peak = 0;
+    let found = false;
+    let normDb = null;
+    for (const ref of chainList) {
+      const chain = ref.deref();
+      if (!chain || chain.ctx.state !== "running") continue;
+      found = true;
+      if (!chain.meter) {
+        const node = createAnalyser.call(chain.ctx);
+        node.fftSize = 4096;
+        ownNodes.add(node);
+        nativeConnect.call(chain.output, node);
+        chain.meter = { node, buf: new Float32Array(4096) };
+      }
+      readTimeDomain.call(chain.meter.node, chain.meter.buf);
+      let p = 0;
+      for (const v of chain.meter.buf) p = Math.max(p, Math.abs(v));
+      if (chain.norm && (normDb === null || p >= peak)) normDb = chain.norm.leveler.gainDb;
+      peak = Math.max(peak, p);
+    }
+    if (found && meterTimer === null) {
+      meterTimer = setTimer(() => {
+        if (now() - meterAsked < 3000) return;
+        for (const ref of chainList) {
+          const chain = ref.deref();
+          if (!chain || !chain.meter) continue;
+          try {
+            nativeDisconnect.call(chain.output, chain.meter.node);
+          } catch (e) {
+            // ignored
+          }
+          chain.meter = null;
+        }
+        clearTimer(meterTimer);
+        meterTimer = null;
+      }, 1000);
+    }
+    return { processing: found, peak, normDb };
+  }
+
+  document.addEventListener("tab-volume-clean:meter", () => {
+    let r;
+    try {
+      r = readMeter();
+    } catch (e) {
+      r = { processing: false, peak: 0, normDb: null };
+    }
+    document.dispatchEvent(new CustomEvent("tab-volume-clean:meter-reply", { detail: JSON.stringify(r) }));
   });
 
   // Probe for the automated tests (test/page.html): returns the output nodes, nothing else.
@@ -337,8 +632,17 @@
     const outputs = [];
     for (const ref of chainList) {
       const c = ref.deref();
-      if (c) outputs.push({ context: c.ctx, output: c.output, media: c.ctx === mediaContext });
+      if (c) {
+        outputs.push({
+          context: c.ctx,
+          output: c.output,
+          media: c.ctx === mediaContext,
+          layout: c.layout,
+          mono: c.input.channelCountMode === "explicit",
+          normDb: c.norm ? c.norm.leveler.gainDb : null,
+        });
+      }
     }
-    e.detail.receive({ gain, active, outputs });
+    e.detail.receive({ gain, normalize, mono, enabled, active, outputs });
   });
 })();

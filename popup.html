@@ -7,12 +7,22 @@
 </head>
 <body>
   <main>
-    <div class="site" id="site">…</div>
+    <div class="head">
+      <div class="site" id="site">…</div>
+      <label class="check"><input type="checkbox" id="enabled" checked> <span id="enabledLabel"></span></label>
+    </div>
     <div class="row">
       <input type="range" id="slider" min="0" max="600" step="5" value="100">
-      <output id="value" for="slider">100%</output>
+      <div class="value"><output id="value" for="slider">100%</output><span class="db" id="db">0.0 dB</span></div>
+    </div>
+    <div class="meter" aria-hidden="true"><div class="fill" id="fill"></div></div>
+    <div class="meter-text" id="meterText"></div>
+    <div class="row options">
+      <label class="check"><input type="checkbox" id="normalize"> <span id="normalizeLabel"></span></label>
+      <label class="check"><input type="checkbox" id="mono"> <span id="monoLabel"></span></label>
     </div>
     <div class="row actions">
+      <button type="button" id="mute" aria-pressed="false"></button>
       <button type="button" id="reset"></button>
     </div>
     <p class="note" id="note"></p>

@@ -1,0 +1,71 @@
+<!doctype html><meta charset="utf-8"><title>normalize bench</title>
+<script src="scenario.js"></script>
+<script>
+// Offline Normalize bench (OfflineAudioContext only, silent).
+// Rebuilds the chain of hook.js with the leveler code taken from hook.js itself, steps it every 50 ms
+// on the last 2048 samples like the extension does, then renders the output with the same gain automation.
+const CURVE = (() => {
+  const RANGE = 8, KNEE = 0.9, n = 65537, c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const y = RANGE * ((2 * i) / (n - 1) - 1), a = Math.abs(y);
+    c[i] = Math.sign(y) * (a <= KNEE ? a : KNEE + (1 - KNEE) * Math.tanh((a - KNEE) / (1 - KNEE)));
+  }
+  return c;
+})();
+
+async function weighted(x, sr) {
+  const ctx = new OfflineAudioContext(1, x.length, sr);
+  const buf = ctx.createBuffer(1, x.length, sr); buf.copyToChannel(x, 0);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 100; hp.Q.value = Math.SQRT1_2;
+  const sh = ctx.createBiquadFilter(); sh.type = 'highshelf'; sh.frequency.value = 1500; sh.gain.value = 4;
+  src.connect(hp).connect(sh).connect(ctx.destination); src.start();
+  return (await ctx.startRendering()).getChannelData(0);
+}
+
+// gainPct: volume slider. normalize: false = chain of 1.1.1 (input -> shaper).
+async function renderChain(x, sr, gainPct, normalize, createLeveler) {
+  const steps = [];
+  const ctx = new OfflineAudioContext(1, x.length, sr);
+  const buf = ctx.createBuffer(1, x.length, sr); buf.copyToChannel(x, 0);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const input = ctx.createGain(); input.gain.value = gainPct / 100 / 8;
+  const shaper = ctx.createWaveShaper(); shaper.curve = CURVE; shaper.oversample = 'none';
+  src.connect(input);
+  if (normalize) {
+    const w = await weighted(x, sr);
+    const node = ctx.createGain();
+    input.connect(node).connect(shaper);
+    const lev = createLeveler();
+    const BLOCK = 2048, dt = 0.05;
+    for (let t = dt; t * sr < x.length; t += dt) {
+      const end = Math.round(t * sr);
+      let peak = 0, sum = 0;
+      for (let i = Math.max(0, end - BLOCK); i < end; i++) { peak = Math.max(peak, Math.abs(x[i])); sum += w[i] * w[i]; }
+      const before = lev.gainDb;
+      const g = lev.step(sum / BLOCK, peak, dt);
+      if (g !== before) node.gain.setTargetAtTime(Math.pow(10, g / 20), t, g < before ? 0.01 : 0.03);
+      steps.push(g);
+    }
+  } else {
+    input.connect(shaper);
+  }
+  shaper.connect(ctx.destination);
+  src.start();
+  const y = (await ctx.startRendering()).getChannelData(0);
+  return { y, steps };
+}
+
+window.runNormalize = async (levelerSource, gainPct = 100) => {
+  const createLeveler = new Function(levelerSource + '\nreturn createLeveler;')();
+  const scn = scnBuild();
+  const out = {};
+  const off = await renderChain(scn.x, scn.sr, gainPct, false, createLeveler);
+  out.off = scnAnalyse(scn, off.y);
+  const on = await renderChain(scn.x, scn.sr, gainPct, true, createLeveler);
+  out.on = scnAnalyse(scn, on.y);
+  // Gain trajectory, one value per 0.5 s, for the report.
+  out.trajectory = on.steps.filter((_, i) => i % 10 === 9).map((g) => +g.toFixed(1));
+  return out;
+};
+</script>

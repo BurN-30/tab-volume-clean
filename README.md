@@ -1,5 +1,7 @@
 # Tab Volume Clean
 
+**Install from Firefox Add-ons (AMO): https://addons.mozilla.org/firefox/addon/tab-volume-clean/**
+
 Set the volume of the current tab from 0 to 600% in Firefox-based browsers (Firefox, Zen, LibreWolf...), including WebRTC calls such as BigBlueButton or Jitsi, without the distortion many volume boosters add. Optional voice normalizer for video calls, mono, mute, level meter, keyboard shortcuts.
 
 Commercial use not permitted (see [License](#license)).

@@ -65,7 +65,7 @@ With Normalize off, the chain is exactly the one of 1.1.1 (volume, soft clipper,
 
 ### Other ways
 
-Get `tab-volume-clean-<version>.xpi` from the Releases page, or build it yourself (see [Development](#development)).
+Get the `.xpi` of any version from the [Releases page](https://github.com/BurN-30/tab-volume-clean/releases), or build it yourself (see [Development](#development)).
 
 ### Zen, LibreWolf, Firefox Developer Edition / Nightly / ESR (unsigned install)
 

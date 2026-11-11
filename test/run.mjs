@@ -116,8 +116,9 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   if (msg.type !== 'tab-volume-clean:test') return undefined;
   const op = msg.command ? tvcCommand(msg.command) : tvcSave(tvcSiteKey(sender.tab.url), msg.name, msg.value);
   return op
-    .then(() => Promise.all([browser.storage.local.get(null), browser.tabs.get(sender.tab.id)]))
-    .then(([store, tab]) => ({ store, muted: tab.mutedInfo.muted }));
+    .then(() => new Promise((r) => setTimeout(r, 100))) // let the badge follow storage
+    .then(() => Promise.all([browser.storage.local.get(null), browser.tabs.get(sender.tab.id), browser.action.getBadgeText({ tabId: sender.tab.id })]))
+    .then(([store, tab, badge]) => ({ store, muted: tab.mutedInfo.muted, badge }));
 });
 `);
   fs.appendFileSync(path.join(copy, 'bridge.js'), `
@@ -251,8 +252,11 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   await wait(1500);
   const again = await page2.evaluate(() => measure());
   check(again.active === true && Math.abs(again.gain - 1.5) < 1e-9, `per-site value re-applied on load (gain ${again.gain})`);
-  const stored = await setPercent(100, page2);
-  check(Object.keys(stored).length === 0, 'back to 100%: nothing stored');
+  const badge150 = await page2.evaluate(() => extSet('command', 'none'));
+  check(badge150.badge === '150', `toolbar badge after loading the page: "${badge150.badge}"`);
+  const back100 = await page2.evaluate(() => extSet(100));
+  check(Object.keys(back100.store).length === 0, 'back to 100%: nothing stored');
+  check(back100.badge === '', `toolbar badge cleared at 100%: "${back100.badge}"`);
 
   const ui = await browser.newPage();
   await ui.goto(`http://127.0.0.1:${port}/popup-test.html`);

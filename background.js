@@ -53,8 +53,11 @@ async function badge(tab) {
   }
 }
 
-async function badgeAll() {
-  for (const tab of await browser.tabs.query({})) badge(tab);
+// Every tab, or only the tabs of the given sites.
+async function badgeAll(sites) {
+  for (const tab of await browser.tabs.query({})) {
+    if (!sites || sites.has(tvcSiteKey(tab.url))) badge(tab);
+  }
 }
 
 browser.action.setBadgeBackgroundColor({ color: "#2f6fde" });
@@ -62,8 +65,16 @@ if (browser.action.setBadgeTextColor) browser.action.setBadgeTextColor({ color: 
 browser.tabs.onUpdated.addListener((id, info, tab) => {
   if (info.url || info.status === "loading") badge(tab);
 });
+// A slider drag writes many times per second: only the tabs of the changed site are updated.
 browser.storage.onChanged.addListener((changes, area) => {
-  if (area === "local") badgeAll();
+  if (area !== "local") return;
+  const sites = new Set();
+  for (const key of Object.keys(changes)) {
+    for (const prefix of Object.values(TVC_PREFIXES)) {
+      if (key.startsWith(prefix)) sites.add(key.slice(prefix.length));
+    }
+  }
+  if (sites.size) badgeAll(sites);
 });
-browser.runtime.onStartup.addListener(badgeAll);
-browser.runtime.onInstalled.addListener(badgeAll);
+browser.runtime.onStartup.addListener(() => badgeAll());
+browser.runtime.onInstalled.addListener(() => badgeAll());

@@ -6,12 +6,12 @@
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
-    "lint": "web-ext lint --source-dir . --ignore-files \"test/**\" \"node_modules/**\" \"dist/**\" package.json package-lock.json README.md LICENSE",
+    "lint": "web-ext lint --source-dir . --ignore-files test \"test/**\" \"node_modules/**\" \"dist/**\" package.json package-lock.json README.md LICENSE",
     "test": "node test/run.mjs",
     "bench": "node test/bench/run.mjs",
     "bench:normalize": "node test/bench/normalize.mjs",
     "bench:realtime": "node test/bench/realtime.mjs",
-    "build": "web-ext build --source-dir . --artifacts-dir dist --overwrite-dest --filename \"tab-volume-clean-{version}.xpi\" --ignore-files \"test/**\" \"node_modules/**\" \"dist/**\" package.json package-lock.json README.md .gitignore"
+    "build": "web-ext build --source-dir . --artifacts-dir dist --overwrite-dest --filename \"tab-volume-clean-{version}.xpi\" --ignore-files test \"test/**\" \"node_modules/**\" \"dist/**\" package.json package-lock.json README.md .gitignore"
   },
   "devDependencies": {
     "puppeteer-core": "25.16.0",

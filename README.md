@@ -51,7 +51,7 @@ With Normalize off, the chain is exactly the one of 1.1.1 (volume, soft clipper,
 
 - **Boosting a loud source:** above 100%, a source that already peaks near full scale cannot get louder without being shaped. A plain gain hard-clips there, while this extension rounds the peaks off, which still sounds harsh when pushed hard. Lower the value until it is clean. For more clean loudness, raise the system or headset volume.
 - **Normalize is made for speech.** It has no look-ahead (that would delay the call), so the first syllable of a loud voice right after a boosted quiet one can be rounded by the soft clipper for about 50 ms. Continuous music without pauses keeps the gain it reached.
-- **Media the extension cannot capture:** DRM-protected media, cross-origin media served without CORS, and media sent by the page to a specific output device (`setSinkId`). For these only lowering works, through `element.volume`, because capturing them would mute them or move them to the default device. Normalize, Mono and the level meter do not apply to them; Mute does.
+- **Media the extension cannot capture:** DRM-protected media, cross-origin media served without CORS, and media sent by the page to a specific output device (`setSinkId`). For these only lowering works, through `element.volume`, because capturing them would mute them or move them to the default device; when the page sets its own volume again, it is lowered too, so 0% stays silent. Normalize, Mono and the level meter do not apply to them; Mute does.
 - **Level meter:** shown only while the tab's sound is processed (not at the defaults, where nothing is touched).
 - **Tabs already open at install time** need a reload.
 - **Other volume extensions:** disable them. Two extensions capturing the same element get in each other's way.
@@ -109,7 +109,8 @@ The tests never play sound. Firefox is started with a mock audio backend (`media
 - the level meter answers through the same path as the popup;
 - the shortcuts move the volume along the slider curve and mute the tab;
 - the per-site value is re-applied on reload;
-- the popup (slider curve and detent, % and dB, value announced to screen readers, options, mute, On switch, locale strings) and the options page work.
+- the popup (slider curve and detent, % and dB, value announced to screen readers, options, mute, On switch, locale strings) and the options page work;
+- at 0%, cross-origin media lowered through its volume stays silent when the page sets its volume again, an element started by `autoplay` inside a closed shadow root is captured, and a page node disconnected with `disconnect(0)` is not reconnected.
 
 `test/bench/compare.mjs` compares the chain with a plain linear gain on a speech-like signal: the level difference is 0.00 dB wherever the plain gain does not clip.
 

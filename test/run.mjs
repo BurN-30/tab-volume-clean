@@ -74,6 +74,10 @@ window.browser = {
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
+// Same content on "localhost": another origin, for the cross-origin media test.
+const crossServer = http.createServer(server.listeners('request')[0]);
+await new Promise((r) => crossServer.listen(0, 'localhost', r));
+const crossPort = crossServer.address().port;
 
 const browser = await puppeteer.launch({
   browser: 'firefox',
@@ -321,9 +325,63 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   await wait(200);
   check(!(await opt.$eval('#empty', (e) => e.hidden)), 'options: Forget all sites empties the list');
 
+  // ---------- Cases where 0% used to let sound through ----------
+  // Fresh page of the same site, back at the defaults (nothing stored).
+  const edge = await browser.newPage();
+  await edge.goto(`http://127.0.0.1:${port}/page.html?edge`);
+  await edge.evaluate(async (crossPort) => {
+    // A page node connected to the output, then disconnected by output index, before the extension is active.
+    window.edgeCtx = new AudioContext();
+    const osc = edgeCtx.createOscillator();
+    osc.frequency.value = 2000;
+    osc.connect(edgeCtx.destination);
+    osc.disconnect(0);
+    osc.start();
+    // Cross-origin media without CORS ("localhost" is another origin than "127.0.0.1"): lowered through its volume.
+    window.crossAudio = new Audio(`http://localhost:${crossPort}/tone.wav`);
+    crossAudio.loop = true;
+    await crossAudio.play();
+    // An element in a closed shadow root started by its autoplay attribute, without play().
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = host.attachShadow({ mode: 'closed' });
+    window.shadowAudio = document.createElement('audio');
+    shadowAudio.src = '/tone.wav';
+    shadowAudio.loop = true;
+    shadowAudio.autoplay = true;
+    root.append(shadowAudio);
+  }, crossPort);
+  await wait(800);
+  await setPercent(0, edge);
+  await wait(400);
+  const z = await edge.evaluate(async () => {
+    const p = await probe();
+    const info = (el) => p.media.find((m) => m.element === el) || null;
+    const cross = info(crossAudio);
+    const shadow = info(shadowAudio);
+    return {
+      pageChain: p.outputs.some((o) => o.context === edgeCtx),
+      cross: cross && { fallback: cross.fallback, volume: cross.volume },
+      shadow: shadow && { captured: shadow.captured, playing: !shadowAudio.paused },
+    };
+  });
+  check(!z.pageChain, 'a node disconnected with disconnect(0) is not reconnected when the extension starts');
+  check(z.cross && z.cross.fallback && z.cross.volume === 0, `cross-origin media without CORS at 0%: volume ${z.cross && z.cross.volume}`);
+  const after = await edge.evaluate(async () => {
+    crossAudio.volume = 0.8; // the player sets its own volume again
+    const p = await probe();
+    return { read: crossAudio.volume, applied: p.media.find((m) => m.element === crossAudio).volume };
+  });
+  check(after.read === 0.8 && after.applied === 0, `the page sets volume 0.8 again: it reads ${after.read} back, ${after.applied} is applied (still silent)`);
+  await setPercent(50, edge);
+  const half = await edge.evaluate(async () => (await probe()).media.find((m) => m.element === crossAudio).volume);
+  check(Math.abs(half - 0.4) < 1e-9, `at 50% the page's 0.8 becomes ${half}`);
+  check(z.shadow && z.shadow.captured && z.shadow.playing, 'an element started by autoplay in a closed shadow root is captured');
+  await setPercent(100, edge);
 } finally {
   await browser.close();
   server.close();
+  crossServer.close();
 }
 console.log(failures ? `\n${failures} failure(s)` : '\nAll good');
 process.exit(failures ? 1 : 0);

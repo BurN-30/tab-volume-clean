@@ -387,6 +387,10 @@
   P.disconnect = function disconnect(target) {
     if (arguments.length === 0) {
       destLinks.delete(this);
+    } else if (typeof target === "number") {
+      // disconnect(output): every connection of that output goes, the ones to the output device included.
+      const links = destLinks.get(this);
+      if (links) destLinks.set(this, links.filter((l) => l.output !== target));
     } else if (target && isRealtimeDestination(target)) {
       const links = destLinks.get(this);
       const out = arguments.length > 1 ? arguments[1] : undefined;
@@ -451,13 +455,24 @@
     return nativePlay.apply(this, arguments);
   };
 
-  document.addEventListener(
-    "play",
-    (e) => {
-      if (e.target instanceof HTMLMediaElement) track(e.target);
-    },
-    true
-  );
+  const onPlay = (e) => {
+    if (e.target instanceof HTMLMediaElement) track(e.target);
+  };
+  document.addEventListener("play", onPlay, true);
+  // The play event does not leave a shadow root: an element started there by its autoplay attribute
+  // (no play() call) would otherwise never be seen. Listen on every shadow root, closed ones included.
+  const nativeAttachShadow = Element.prototype.attachShadow;
+  if (nativeAttachShadow) {
+    Element.prototype.attachShadow = function attachShadow() {
+      const root = nativeAttachShadow.apply(this, arguments);
+      try {
+        root.addEventListener("play", onPlay, true);
+      } catch (e) {
+        // ignored
+      }
+      return root;
+    };
+  }
 
   function isCrossOriginWithoutCors(el) {
     if (el.srcObject) return false; // MediaStream (WebRTC): never opaque
@@ -476,14 +491,37 @@
     return Boolean(el.mediaKeys) || isCrossOriginWithoutCors(el) || Boolean(el.sinkId);
   }
 
+  const volumeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume");
+  const getVolume = volumeDesc.get;
+  const setVolume = volumeDesc.set;
+
   function applyFallback(el) {
-    if (!fallback.has(el)) fallback.set(el, el.volume);
+    if (!fallback.has(el)) fallback.set(el, getVolume.call(el));
     try {
-      el.volume = Math.max(0, Math.min(1, fallback.get(el) * (enabled ? Math.min(1, gain) : 1)));
+      setVolume.call(el, Math.max(0, Math.min(1, fallback.get(el) * (enabled ? Math.min(1, gain) : 1))));
     } catch (e) {
       // ignored
     }
   }
+
+  // On an element lowered through its volume, the page keeps its own value: it reads back what it wrote,
+  // and what it writes is lowered too. Without this, a player that sets its volume again (new track,
+  // its own slider, end of an ad) would bring the sound back to full level, even at 0%.
+  Object.defineProperty(HTMLMediaElement.prototype, "volume", {
+    configurable: true,
+    enumerable: volumeDesc.enumerable,
+    get: function volume() {
+      return fallback.has(this) ? fallback.get(this) : getVolume.call(this);
+    },
+    set: function volume(v) {
+      const n = Number(v);
+      // Values the browser rejects (out of range, NaN) go to the native setter, which throws as expected.
+      if (!fallback.has(this) || !(n >= 0 && n <= 1)) return setVolume.call(this, v);
+      fallback.set(this, n);
+      applyFallback(this);
+      return undefined;
+    },
+  });
 
   function getMediaContext() {
     if (mediaContext && mediaContext.state !== "closed") return mediaContext;
@@ -643,6 +681,11 @@
         });
       }
     }
-    e.detail.receive({ gain, normalize, mono, enabled, active, outputs });
+    const media = [];
+    for (const ref of mediaList) {
+      const el = ref.deref();
+      if (el) media.push({ element: el, captured: captured.has(el), fallback: fallback.has(el), volume: getVolume.call(el) });
+    }
+    e.detail.receive({ gain, normalize, mono, enabled, active, outputs, media });
   });
 })();

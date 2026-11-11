@@ -39,7 +39,7 @@
       if (all[k.normalize] === true) opts.push(t("normalize"));
       if (all[k.mono] === true) opts.push(t("mono"));
       const tr = document.createElement("tr");
-      const cells = [site === "file" ? t("localFiles") : site, tvcPercent(gain) + "% (" + tvcDb(gain) + ")", opts.join(", ")];
+      const cells = [site === "file" ? t("localFiles") : site, tvcPercentText(gain) + " (" + tvcDb(gain) + ")", opts.join(", ")];
       for (const text of cells) {
         const td = document.createElement("td");
         td.textContent = text;

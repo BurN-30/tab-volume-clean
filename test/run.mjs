@@ -150,7 +150,7 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   const level = (res, media, f) => res.chains.find((c) => c.media === media)[`dB${f}`];
 
   const results = {};
-  for (const p of [50, 100, 200, 400, 600]) {
+  for (const p of [0, 50, 100, 200, 400, 600]) {
     const stored = await setPercent(p);
     results[p] = await page.evaluate(() => measure());
     console.log(`\n--- ${p}% (stored: ${JSON.stringify(stored)})`);
@@ -160,6 +160,7 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   const media = (p) => results[p].chains.find((c) => c.media);
   const pageCh = (p) => results[p].chains.find((c) => !c.media);
   check(media(50) && pageCh(50), 'two chains: <audio>/<video> elements and page Web Audio');
+  check(media(0).peak === 0 && pageCh(0).peak === 0, `0% is true silence: peaks ${media(0).peak} (elements), ${pageCh(0).peak} (page Web Audio)`);
   check(media(50).sampleRate === pageCh(50).sampleRate, `native rate: ${media(50).sampleRate} Hz, same as the page`);
   const d = (p, f, ch) => ch(p)[`dB${f}`] - ch(100)[`dB${f}`];
   const expect = { 50: -6.02, 200: 6.02, 400: 12.04 };
@@ -226,11 +227,12 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   check(Math.abs(dOn - 6.02) < 0.3, `on again: the stored 200% applies (${dOn.toFixed(2)} dB)`);
 
   // ---------- Keyboard shortcuts ----------
+  // The shortcuts move 5 positions on the cubic slider: 200% is position 69, 74 is 243%, 64 is 157%.
   let r = await setOption('command', 'volume-up');
-  check(Math.abs(r.store['site:127.0.0.1'] - 2.1) < 1e-9, 'shortcut volume up: 200 -> 210%');
+  check(Math.abs(r.store['site:127.0.0.1'] - 2.431344) < 1e-9, 'shortcut volume up: 200 -> 243% (one step on the slider curve)');
   await setOption('command', 'volume-down');
   r = await setOption('command', 'volume-down');
-  check(Math.abs(r.store['site:127.0.0.1'] - 1.9) < 1e-9, 'shortcut volume down: 210 -> 190%');
+  check(Math.abs(r.store['site:127.0.0.1'] - 1.572864) < 1e-9, 'shortcut volume down twice: 243 -> 197 -> 157%');
   r = await setOption('command', 'toggle-mute');
   check(r.muted === true, 'shortcut mute: the tab is muted');
   r = await setOption('command', 'toggle-mute');
@@ -255,11 +257,27 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   check((await ui.$eval('#reset', (e) => e.textContent)) === 'Reset to 100%', 'popup text comes from _locales');
   check((await ui.$eval('#db', (e) => e.textContent)) === '0.0 dB', 'popup shows dB next to %: 100% = 0.0 dB');
   await ui.focus('#slider');
-  for (let i = 0; i < 20; i++) await ui.keyboard.press('ArrowRight');
+  check((await ui.$eval('#slider', (e) => e.value)) === '55', 'popup: 100% sits at position 55 of 100 (cubic curve)');
+  for (let i = 0; i < 5; i++) await ui.keyboard.press('ArrowRight');
   await wait(200);
-  check((await ui.$eval('#value', (e) => e.textContent)) === '200%', 'popup slider with keyboard: 100 -> 200%');
-  check((await ui.evaluate(() => window.__store['site:example.org'])) === 2, 'popup stores 200% as gain 2');
-  check((await ui.$eval('#db', (e) => e.textContent)) === '+6.0 dB', 'popup: 200% = +6.0 dB');
+  check((await ui.$eval('#value', (e) => e.textContent)) === '130%', 'popup slider with keyboard: 100 -> 130% in 5 steps');
+  check((await ui.evaluate(() => window.__store['site:example.org'])) === 1.296, 'popup stores 130% as gain 1.296');
+  check((await ui.$eval('#db', (e) => e.textContent)) === '+2.3 dB', 'popup: 130% = +2.3 dB');
+  check((await ui.$eval('#slider', (e) => e.getAttribute('aria-valuetext'))) === '130%, +2.3 dB', 'popup slider announces the real value to screen readers');
+  for (let i = 0; i < 6; i++) await ui.keyboard.press('ArrowLeft');
+  await wait(200);
+  check((await ui.$eval('#value', (e) => e.textContent)) === '100%' && !('site:example.org' in (await ui.evaluate(() => window.__store))),
+    'popup detent: one step below 100% still gives exactly 100% (nothing stored)');
+  await ui.keyboard.press('ArrowLeft');
+  await wait(200);
+  check((await ui.$eval('#value', (e) => e.textContent)) === '89%', 'popup: first step past the detent = 89% (-1.0 dB)');
+  await ui.keyboard.press('Home');
+  await wait(200);
+  check((await ui.$eval('#value', (e) => e.textContent)) === '0%' && (await ui.evaluate(() => window.__store['site:example.org'])) === 0,
+    'popup minimum is 0%, stored as gain 0 (silence)');
+  await ui.keyboard.press('ArrowRight');
+  await wait(200);
+  check((await ui.$eval('#value', (e) => e.textContent)) === '<1%', 'popup: first step above 0 shows <1%, not 0%');
   await ui.click('#normalize');
   await ui.click('#mono');
   await wait(100);
@@ -302,6 +320,7 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   await opt.click('#forgetAll');
   await wait(200);
   check(!(await opt.$eval('#empty', (e) => e.hidden)), 'options: Forget all sites empties the list');
+
 } finally {
   await browser.close();
   server.close();

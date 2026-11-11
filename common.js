@@ -57,6 +57,30 @@ function tvcPercent(gain) {
   return Math.round(gain * 100);
 }
 
+// "100%", "37%", "<1%" (between 0 and 0.5%: very quiet but not silent), "0%" (silence).
+function tvcPercentText(gain) {
+  return gain > 0 && gain < 0.005 ? "<1%" : tvcPercent(gain) + "%";
+}
+
+// Slider position (0 to TVC_POSITIONS) <-> linear gain (0 to TVC_MAX_GAIN), on a cubic curve:
+// gain = 6 * (position / 100)^3, the curve PulseAudio uses for its volume sliders. The ear hears levels in dB,
+// so with a linear slider most of the travel sounds alike and the volume only drops in the last few pixels.
+// With the cubic curve each step changes the level by roughly the same amount, 0 is true silence
+// and 100% sits a little past the middle (position 55).
+const TVC_MAX_GAIN = 6;
+const TVC_POSITIONS = 100;
+
+function tvcGainToPosition(gain) {
+  return TVC_POSITIONS * Math.cbrt(Math.max(0, Math.min(TVC_MAX_GAIN, gain)) / TVC_MAX_GAIN);
+}
+
+function tvcPositionToGain(position) {
+  const p = Math.max(0, Math.min(TVC_POSITIONS, position));
+  // Detent: the positions next to 100% land exactly on 100%.
+  if (Math.abs(p - Math.round(tvcGainToPosition(1))) <= 1) return 1;
+  return Math.round(TVC_MAX_GAIN * Math.pow(p / TVC_POSITIONS, 3) * 1e6) / 1e6;
+}
+
 // "+3.5 dB", "0.0 dB", "-inf dB" (the minus sign is U+2212).
 function tvcDb(gain) {
   if (gain <= 0) return "−∞ dB";

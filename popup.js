@@ -54,32 +54,32 @@
   siteEl.title = siteEl.textContent;
 
   const s = await tvcLoad(site);
-  let percent = tvcPercent(s.gain);
-  slider.value = String(percent);
+  let gain = s.gain;
+  slider.value = String(Math.round(tvcGainToPosition(gain)));
   normalizeEl.checked = s.normalize;
   monoEl.checked = s.mono;
   enabledEl.checked = s.enabled;
 
   function show() {
-    valueEl.textContent = percent + "%";
-    dbEl.textContent = tvcDb(percent / 100);
+    valueEl.textContent = tvcPercentText(gain);
+    dbEl.textContent = tvcDb(gain);
+    // The slider position is not a percentage (cubic curve): screen readers announce the real value.
+    slider.setAttribute("aria-valuetext", valueEl.textContent + ", " + dbEl.textContent);
     const on = enabledEl.checked;
     for (const el of [slider, reset, normalizeEl, monoEl]) el.disabled = !on;
     document.body.classList.toggle("off", !on);
-    note.textContent = !on ? t("offNote") : percent > 100 ? t("boostNote") : "";
+    note.textContent = !on ? t("offNote") : gain > 1 ? t("boostNote") : "";
   }
   show();
 
   slider.addEventListener("input", () => {
-    let p = Number(slider.value);
-    if (Math.abs(p - 100) <= 5) p = 100; // small detent at 100%
-    percent = p;
+    gain = tvcPositionToGain(Number(slider.value)); // small detent at 100%
     show();
-    tvcSave(site, "gain", p / 100);
+    tvcSave(site, "gain", gain);
   });
   reset.addEventListener("click", () => {
-    slider.value = "100";
-    percent = 100;
+    gain = 1;
+    slider.value = String(Math.round(tvcGainToPosition(1)));
     show();
     tvcSave(site, "gain", 1);
   });
@@ -95,8 +95,8 @@
     const key = tvcStorageKey(site);
     if (area !== "local" || !(key in changes)) return;
     const v = changes[key].newValue;
-    percent = tvcPercent(typeof v === "number" ? v : 1);
-    slider.value = String(percent);
+    gain = typeof v === "number" ? v : 1;
+    slider.value = String(Math.round(tvcGainToPosition(gain)));
     show();
   });
 

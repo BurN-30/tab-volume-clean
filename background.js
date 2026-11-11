@@ -12,8 +12,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
 
 // ---------- Keyboard shortcuts ----------
 
-const STEP = 0.1; // 10% per key press
-const MAX = 6;
+const STEP = 5; // slider positions per key press (5% of the slider travel, about 2 dB around 100%)
 
 async function tvcCommand(command) {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
@@ -25,9 +24,10 @@ async function tvcCommand(command) {
   const site = tvcSiteKey(tab.url);
   if (!site) return;
   const s = await tvcLoad(site);
-  let g = s.gain;
-  if (command === "volume-up") g = Math.min(MAX, Math.round((g + STEP) * 100) / 100);
-  else if (command === "volume-down") g = Math.max(0, Math.round((g - STEP) * 100) / 100);
+  const pos = Math.round(tvcGainToPosition(s.gain));
+  let g;
+  if (command === "volume-up") g = tvcPositionToGain(pos + STEP);
+  else if (command === "volume-down") g = tvcPositionToGain(pos - STEP);
   else return;
   await tvcSave(site, "gain", g);
 }
@@ -44,7 +44,7 @@ async function badge(tab) {
   if (site) {
     const s = await tvcLoad(site);
     if (!s.enabled) text = "off";
-    else if (s.gain !== 1) text = String(tvcPercent(s.gain));
+    else if (s.gain !== 1) text = tvcPercentText(s.gain).replace("%", "");
   }
   try {
     await browser.action.setBadgeText({ tabId: tab.id, text });

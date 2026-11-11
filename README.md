@@ -19,12 +19,13 @@ Tab Volume Clean keeps the processing as close as possible to the plain linear g
 
 ## Features
 
-- **Popup:** slider from 0 to 600% (step 5, small detent at 100%) with the value in % and in dB, reset button, peak level meter (dBFS), Normalize, Mono, Mute tab, and an On switch for the site.
+- **Popup:** slider from 0 to 600% with the value in % and in dB, reset button, peak level meter (dBFS), Normalize, Mono, Mute tab, and an On switch for the site.
+- **Slider curve:** the ear hears levels in dB, so the slider follows a cubic curve (gain = 6 × position³, as in PulseAudio) instead of a straight line: each step changes the level by about the same amount, 100% sits a little past the middle with a small detent, and 0% is true silence. Only the slider is curved; the processing stays a plain linear gain.
 - **Normalize** (off by default): evens out loud and quiet voices, tuned for video calls. See [Normalize](#normalize).
 - **Mono:** mixes left and right, (L + R) / 2, into both ears. Useful when a call or a video only plays on one side.
 - **Mute tab:** the browser's own tab mute, so it silences everything the tab plays, protected media included.
 - **On / off per site:** turned off, the site's sound passes untouched (gain 1, no clipper, no normalizer); a reload releases it completely.
-- **Keyboard shortcuts:** Alt+Shift+Up and Alt+Shift+Down change the volume by 10%, Alt+Shift+M mutes or unmutes the tab. Change them in `about:addons`, gear icon, **Manage Extension Shortcuts**. The toolbar badge shows the volume when it is not 100%, or `off`.
+- **Keyboard shortcuts:** Alt+Shift+Up and Alt+Shift+Down move the volume 5 steps along the slider curve (about 2 dB around 100%), Alt+Shift+M mutes or unmutes the tab. Change them in `about:addons`, gear icon, **Manage Extension Shortcuts**. The toolbar badge shows the volume when it is not 100%, or `off`.
 - **Per-site memory:** volume, Normalize, Mono and On/off are remembered per site (host name without `www.`). The options page lists the sites with their own settings and forgets them, one by one or all at once.
 - **Handled sources:**
   - classic `<audio>`/`<video>` elements;
@@ -99,15 +100,16 @@ The tests never play sound. Firefox is started with a mock audio backend (`media
 `test/run.mjs` checks that:
 
 - nothing is captured at the defaults;
+- 0% is true silence;
 - the gain is exact at 50%, 200% and 400% (-6, +6 and +12 dB) on a classic `<audio>`, a WebRTC `<audio>` (local `RTCPeerConnection` loop) and a page oscillator, with the 1.1.1 chain;
 - peaks never go above full scale when overdriven at 600%;
 - Normalize boosts a quiet voice, lowers a loud one, does not climb in a pause, and the chain goes back to the 1.1.1 one when it is turned off;
 - Mono sends a left-only source to the right ear, and stops when turned off;
 - turning the site off gives a plain pass-through, turning it on again restores the stored volume;
 - the level meter answers through the same path as the popup;
-- the shortcuts change the volume by 10% and mute the tab;
+- the shortcuts move the volume along the slider curve and mute the tab;
 - the per-site value is re-applied on reload;
-- the popup (slider, % and dB, options, mute, On switch, locale strings) and the options page work.
+- the popup (slider curve and detent, % and dB, value announced to screen readers, options, mute, On switch, locale strings) and the options page work.
 
 `test/bench/compare.mjs` compares the chain with a plain linear gain on a speech-like signal: the level difference is 0.00 dB wherever the plain gain does not clip.
 

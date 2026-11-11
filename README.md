@@ -124,4 +124,4 @@ The tests never play sound. Firefox is started with a mock audio backend (`media
 
 ---
 
-Built with AI assistance; tested automatically, report issues.
+Built with AI assistance.

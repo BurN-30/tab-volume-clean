@@ -1,7 +1,8 @@
 // End-to-end test in a real headless Firefox, fully silent:
 // installs the extension (temporary add-on), opens the test page, changes the settings the way the popup does,
 // and measures what actually comes out of the audio chain: volume at 50, 100, 200, 400 and 600%,
-// Normalize, Mono, turning the extension off for the site, the level meter, the shortcuts, the popup and options page.
+// Normalize, Mono, turning the extension off for the site, the level meter, the shortcuts, the popup and options page,
+// and a real private window: nothing it changes is written to storage.local.
 //
 // Usage: node test/run.mjs   (Firefox path from the FIREFOX variable, default C:/Program Files/Mozilla Firefox/firefox.exe)
 import http from 'node:http';
@@ -100,10 +101,16 @@ const crossServer = http.createServer(server.listeners('request')[0]);
 await new Promise((r) => crossServer.listen(0, 'localhost', r));
 const crossPort = crossServer.address().port;
 
+// Own profile, in which the extension is allowed in private windows (what "Run in Private Windows" in
+// about:addons records), so the test can open a real private window.
+const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'tab-volume-clean-profile-'));
+fs.writeFileSync(path.join(profile, 'extension-preferences.json'),
+  JSON.stringify({ [EXT_ID]: { permissions: ['internal:privateBrowsingAllowed'], origins: [] } }));
 const browser = await puppeteer.launch({
   browser: 'firefox',
   executablePath: FIREFOX,
   headless: true,
+  userDataDir: profile,
   extraPrefsFirefox: {
     // Silence guaranteed: no real audio device is opened (mock cubeb context) and the global volume is zero.
     // Levels are measured on Web Audio nodes (AnalyserNode), never on the sound card.
@@ -132,15 +139,25 @@ try {
   for (const f of EXT_FILES) fs.copyFileSync(path.join(ROOT, f), path.join(copy, f));
   for (const d of ['icons', '_locales']) fs.cpSync(path.join(ROOT, d), path.join(copy, d), { recursive: true });
   fs.appendFileSync(path.join(copy, 'background.js'), `
+// Every storage write, in order, for the private window test.
+const tvcTestWrites = [];
+browser.storage.onChanged.addListener((changes, area) => tvcTestWrites.push({ area, keys: Object.keys(changes) }));
 browser.runtime.onMessage.addListener((msg, sender) => {
   if (!msg) return undefined;
   if (msg.type === 'tab-volume-clean:test-meter') return browser.tabs.sendMessage(sender.tab.id, { type: 'tab-volume-clean:meter' });
   if (msg.type !== 'tab-volume-clean:test') return undefined;
-  const op = msg.command ? tvcCommand(msg.command) : tvcSave(tvcSiteKey(sender.tab.url), msg.name, msg.value);
+  if (msg.op === 'private') return browser.windows.create({ incognito: true, url: msg.url }).then((w) => ({ incognito: w.incognito, tabId: w.tabs[0].id }));
+  if (msg.op === 'close') return browser.tabs.remove(msg.tabId).then(() => new Promise((r) => setTimeout(r, 300)));
+  if (msg.op === 'writes') {
+    return Promise.all([browser.storage.local.get(null), browser.storage.session.get(null)])
+      .then(([store, session]) => ({ writes: tvcTestWrites.splice(0), store, session }));
+  }
+  // Same path as the popup: tvcSet, with the tab's private id when the page is in a private window.
+  const op = msg.command ? tvcCommand(msg.command, sender.tab) : tvcSet(tvcSiteKey(sender.tab.url), msg.name, msg.value, tvcPrivateTab(sender.tab));
   return op
     .then(() => new Promise((r) => setTimeout(r, 100))) // let the badge follow storage
-    .then(() => Promise.all([browser.storage.local.get(null), browser.tabs.get(sender.tab.id), browser.action.getBadgeText({ tabId: sender.tab.id })]))
-    .then(([store, tab, badge]) => ({ store, muted: tab.mutedInfo.muted, badge }));
+    .then(() => Promise.all([browser.storage.local.get(null), browser.storage.session.get(null), browser.tabs.get(sender.tab.id), browser.action.getBadgeText({ tabId: sender.tab.id })]))
+    .then(([store, session, tab, badge]) => ({ store, session, muted: tab.mutedInfo.muted, badge, incognito: tab.incognito }));
 });
 `);
   fs.appendFileSync(path.join(copy, 'bridge.js'), `
@@ -163,6 +180,11 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   fs.writeFileSync(path.join(copy, 'popup.js'), popupSrc
     .replace('browser.tabs.query({ active: true, currentWindow: true })', 'tvcTabs.query({ url: new URLSearchParams(location.search).get("match") })')
     .replaceAll('browser.tabs.', 'tvcTabs.'));
+  // common.js also uses browser.tabs and storage.session (private tabs), which a frame does not get either.
+  const commonSrc = fs.readFileSync(path.join(copy, 'common.js'), 'utf8');
+  fs.writeFileSync(path.join(copy, 'common.js'), commonSrc
+    .replace('browser.tabs.sendMessage(privateTab', '(window.tvcTabs || browser.tabs).sendMessage(privateTab')
+    .replaceAll('browser.storage.session.', '(window.tvcSession || browser.storage.session).'));
   fs.writeFileSync(path.join(copy, 'popup.html'), fs.readFileSync(path.join(copy, 'popup.html'), 'utf8')
     .replace('<script src="common.js">', '<script src="popup-probe.js"></script> <script src="common.js">'));
   fs.writeFileSync(path.join(copy, 'popup-probe.js'), `
@@ -170,6 +192,10 @@ window.tvcTabs = {
   query: (arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'query', arg }),
   update: (id, arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'update', id, arg }),
   sendMessage: (id, arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'send', id, arg }).then((x) => x && x.r),
+};
+window.tvcSession = {
+  get: (arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'session-get', arg }),
+  set: (arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'session-set', arg }),
 };
 (() => {
   const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
@@ -190,8 +216,11 @@ window.tvcTabs = {
     if (!e.data || e.data.ask !== 'state') return;
     const s = document.getElementById('slider');
     const r = s.getBoundingClientRect();
+    const on = document.getElementById('enabled').getBoundingClientRect();
     send({ kind: 'state', id: e.data.id, value: d.get.call(s), text: document.getElementById('value').textContent,
-      site: document.getElementById('site').textContent, rect: { x: r.x, y: r.y, w: r.width, h: r.height } });
+      site: document.getElementById('site').textContent, note: document.getElementById('note').textContent,
+      enabled: document.getElementById('enabled').checked,
+      rect: { x: r.x, y: r.y, w: r.width, h: r.height }, enabledRect: { x: on.x, y: on.y, w: on.width, h: on.height } });
   });
 })();
 `);
@@ -201,6 +230,8 @@ browser.runtime.onMessage.addListener((msg) => {
   if (msg.op === 'query') return browser.tabs.query(msg.arg);
   if (msg.op === 'update') return browser.tabs.update(msg.id, msg.arg);
   if (msg.op === 'send') return browser.tabs.sendMessage(msg.id, msg.arg).then((r) => ({ r }));
+  if (msg.op === 'session-get') return browser.storage.session.get(msg.arg);
+  if (msg.op === 'session-set') return browser.storage.session.set(msg.arg);
   return undefined;
 });
 `);
@@ -515,10 +546,101 @@ browser.runtime.onMessage.addListener((msg) => {
   check(Math.abs(half - 0.4) < 1e-9, `at 50% the page's 0.8 becomes ${half}`);
   check(z.shadow && z.shadow.captured && z.shadow.playing, 'an element started by autoplay in a closed shadow root is captured');
   await setPercent(100, edge);
+
+  // ---------- Private window ----------
+  // A real private window: what is changed there applies to its tab only and is never written to storage.local
+  // (which is kept on disk); normal windows are not affected.
+  const extRaw = (target, msg) => target.evaluate((m) => new Promise((resolve) => {
+    document.addEventListener('tab-volume-clean:test-reply', (e) => resolve(JSON.parse(e.detail)), { once: true });
+    document.dispatchEvent(new CustomEvent('tab-volume-clean:test', { detail: JSON.stringify(m) }));
+  }), msg);
+  const gainOf = async (target) => (await target.evaluate(() => probe())).gain;
+  await setPercent(150); // saved for the site in a normal window
+  const savedStore = (await extRaw(page, { op: 'writes' })).store; // also empties the list of writes
+  const opened = await extRaw(page, { op: 'private', url: `http://127.0.0.1:${port}/page.html?private` });
+  await wait(1500);
+  const priv = (await browser.pages()).find((p) => p.url().endsWith('/page.html?private'));
+  check(opened.incognito === true && Boolean(priv), `a private window is open (incognito: ${opened.incognito}) and driven by the test`);
+  const privKey = (key) => `tab${opened.tabId}|${key}`;
+  const privSet = async (msg) => {
+    const r = await extRaw(priv, msg);
+    await wait(600);
+    return r;
+  };
+  await priv.evaluate(() => startAll());
+  await wait(1500);
+  const privStart = await priv.evaluate(() => measure());
+  check(privStart.active === true && Math.abs(privStart.gain - 1.5) < 1e-9, `a private tab starts from the volume saved for the site (gain ${privStart.gain})`);
+
+  let pr = await privSet({ name: 'gain', value: 0.5 });
+  check(pr.incognito === true && pr.session[privKey('site:127.0.0.1')] === 0.5 && pr.store['site:127.0.0.1'] === 1.5,
+    `private window, volume 50%: kept for the tab in memory (storage.session), saved value unchanged (${pr.store['site:127.0.0.1']})`);
+  check((await gainOf(priv)) === 0.5 && (await gainOf(page)) === 1.5, 'the private tab plays at 50%, the normal tab of the same site stays at 150%');
+  check(pr.badge === '50', `private tab badge: "${pr.badge}"`);
+  pr = await privSet({ name: 'enabled', value: false });
+  const privOff = await priv.evaluate(() => measure());
+  check(privOff.enabled === false && pr.session[privKey('off:127.0.0.1')] === true && !('off:127.0.0.1' in pr.store) && (await page.evaluate(() => measure())).enabled === true,
+    'private window, extension turned off for the site: only in that tab, nothing saved');
+  await privSet({ name: 'enabled', value: true });
+  pr = await privSet({ command: 'volume-up' });
+  const upGain = conv.tvcPositionToGain(Math.round(conv.tvcGainToPosition(0.5)) + 5);
+  check(pr.session[privKey('site:127.0.0.1')] === upGain && (await gainOf(priv)) === upGain && pr.store['site:127.0.0.1'] === 1.5,
+    `private window, shortcut volume up: 50 -> ${conv.tvcPercentText(upGain)} in the tab, in memory only`);
+
+  // The real popup, opened on the private tab: slider and On switch.
+  const pframe = await browser.newPage();
+  await pframe.goto(`http://localhost:${crossPort}/popup-frame.html?match=${encodeURIComponent('*://127.0.0.1/page.html?private')}`);
+  await wait(1500);
+  const ps0 = await pframe.evaluate(() => ask());
+  check(ps0.site === '127.0.0.1' && ps0.text === conv.tvcPercentText(upGain) && ps0.note === messages.privateNote.message,
+    `popup on the private tab: shows the tab's own value (${ps0.text}) and says nothing is saved ("${ps0.note}")`);
+  const pfr = await pframe.evaluate(() => { const r = document.getElementById('p').getBoundingClientRect(); return { x: r.x, y: r.y }; });
+  await pframe.mouse.click(pfr.x + ps0.rect.x + ps0.rect.w * (0.03 + 0.94 * 0.8), pfr.y + ps0.rect.y + ps0.rect.h / 2);
+  await wait(600);
+  const ps1 = await pframe.evaluate(() => ask());
+  const popupGain = conv.tvcPositionToGain(Number(ps1.value));
+  pr = await extRaw(page, { op: 'writes' });
+  let privWrites = pr.writes;
+  check(popupGain > 2 && pr.session[privKey('site:127.0.0.1')] === popupGain && (await gainOf(priv)) === popupGain && pr.store['site:127.0.0.1'] === 1.5,
+    `popup slider in the private window: ${ps1.text} applied in the tab, in memory only (saved value still ${pr.store['site:127.0.0.1']})`);
+  await pframe.mouse.click(pfr.x + ps1.enabledRect.x + ps1.enabledRect.w / 2, pfr.y + ps1.enabledRect.y + ps1.enabledRect.h / 2);
+  await wait(600);
+  const ps2 = await pframe.evaluate(() => ask());
+  pr = await extRaw(page, { op: 'writes' });
+  privWrites = privWrites.concat(pr.writes);
+  check(ps2.enabled === false && (await priv.evaluate(() => measure())).enabled === false && pr.session[privKey('off:127.0.0.1')] === true && !('off:127.0.0.1' in pr.store),
+    'popup On switch in the private window: off in that tab only, nothing saved');
+  await pframe.mouse.click(pfr.x + ps1.enabledRect.x + ps1.enabledRect.w / 2, pfr.y + ps1.enabledRect.y + ps1.enabledRect.h / 2);
+  await wait(600);
+  await pframe.close();
+  const privLocal = privWrites.filter((w) => w.area === 'local');
+  check(privLocal.length === 0 && privWrites.filter((w) => w.area === 'session').length > 0,
+    `storage writes from the private window: ${privWrites.filter((w) => w.area === 'session').length} in memory (storage.session), ${privLocal.length} in storage.local`);
+
+  // A change saved from a normal window: the private tab keeps its own value.
+  await setPercent(200);
+  check((await gainOf(priv)) === popupGain && (await gainOf(page)) === 2, 'a change saved in a normal window does not override the private tab\'s own value');
+  await setPercent(150);
+
+  await extRaw(page, { op: 'close', tabId: opened.tabId });
+  const closed = await extRaw(page, { op: 'writes' });
+  check(Object.keys(closed.session).length === 0, `private tab closed: its settings are gone (${Object.keys(closed.session).length} left in memory)`);
+  check(JSON.stringify(closed.store) === JSON.stringify(savedStore),
+    `storage.local after the private session: identical to before (${JSON.stringify(closed.store)})`);
+
+  // Normal windows: unchanged behavior.
+  const normal = await setPercent(120);
+  check(normal['site:127.0.0.1'] === 1.2 && (await gainOf(page)) === 1.2, 'normal window afterwards: the volume is saved for the site as before (120%)');
+  await setPercent(100);
 } finally {
   await browser.close();
   server.close();
   crossServer.close();
+  try {
+    fs.rmSync(profile, { recursive: true, force: true });
+  } catch (e) {
+    // still locked by Firefox: left in the temporary folder
+  }
 }
 console.log(failures ? `\n${failures} failure(s)` : '\nAll good');
 process.exit(failures ? 1 : 0);

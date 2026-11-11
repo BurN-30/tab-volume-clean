@@ -27,6 +27,7 @@ Tab Volume Clean keeps the processing as close as possible to the plain linear g
 - **On / off per site:** turned off, the site's sound passes untouched (gain 1, no clipper, no normalizer); a reload releases it completely.
 - **Keyboard shortcuts:** Alt+Shift+Up and Alt+Shift+Down move the volume 5 steps along the slider curve (about 2 dB around 100%), Alt+Shift+M mutes or unmutes the tab. Change them in `about:addons`, gear icon, **Manage Extension Shortcuts**. The toolbar badge shows the volume when it is not 100%, or `off`.
 - **Per-site memory:** volume, Normalize, Mono and On/off are remembered per site (host name without `www.`). The options page lists the sites with their own settings and forgets them, one by one or all at once.
+- **Private windows:** nothing is saved. Firefox runs the extension in private windows only if you allow it (`about:addons`, the extension, **Run in Private Windows**). A private tab starts from the settings saved for the site; what you change there applies to that tab only, is kept in memory (`storage.session`, never on disk) and is gone when the tab closes. Saved settings are never changed from a private window.
 - **Handled sources:**
   - classic `<audio>`/`<video>` elements;
   - elements playing a `MediaStream` (`srcObject`, WebRTC);
@@ -109,6 +110,7 @@ The tests never play sound. Firefox is started with a mock audio backend (`media
 - the level meter answers through the same path as the popup;
 - the shortcuts move the volume along the slider curve and mute the tab;
 - the per-site value is re-applied on reload;
+- in a real private window (shortcut, relay and the real popup): the tab starts from the saved settings, its volume and On switch apply to that tab only, nothing is written to `storage.local`, a normal tab of the same site is not affected, the tab's settings are gone once it is closed, and normal windows still save as before;
 - the popup (slider curve and detent, % and dB, value announced to screen readers, options, mute, On switch, locale strings) and the options page work;
 - the real popup slider, dragged back and forth with the mouse while the tab plays: nothing else moves the slider while it is held, and once released the shown value, the stored value and the gain applied in the tab match; a change made elsewhere still moves the open popup;
 - slider position to gain and back: no drift over the whole travel;

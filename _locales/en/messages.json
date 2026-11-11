@@ -16,6 +16,7 @@
   "monoHelp": { "message": "Mix left and right into both ears" },
   "mute": { "message": "Mute tab" },
   "unmute": { "message": "Unmute tab" },
+  "privateNote": { "message": "Private window: changes apply to this tab only and are not saved." },
   "meterIdle": { "message": "Level shown while the tab's sound is processed" },
   "cmdUp": { "message": "Volume up" },
   "cmdDown": { "message": "Volume down" },

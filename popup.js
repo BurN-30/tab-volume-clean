@@ -28,6 +28,8 @@
 
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   const site = tab ? tvcSiteKey(tab.url) : null;
+  // Private window: changes apply to this tab only and are not saved (see tvcPrivateTab in common.js).
+  const privateTab = tvcPrivateTab(tab);
 
   // Mute is the browser's own tab mute: it silences everything the tab plays, nothing is stored.
   let muted = Boolean(tab && tab.mutedInfo && tab.mutedInfo.muted);
@@ -53,7 +55,7 @@
   siteEl.textContent = site === "file" ? t("localFiles") : site;
   siteEl.title = siteEl.textContent;
 
-  const s = await tvcLoad(site);
+  const s = await tvcLoad(site, privateTab);
   let gain = s.gain;
   slider.value = String(Math.round(tvcGainToPosition(gain)));
   normalizeEl.checked = s.normalize;
@@ -68,7 +70,7 @@
     const on = enabledEl.checked;
     for (const el of [slider, reset, normalizeEl, monoEl]) el.disabled = !on;
     document.body.classList.toggle("off", !on);
-    note.textContent = !on ? t("offNote") : gain > 1 ? t("boostNote") : "";
+    note.textContent = !on ? t("offNote") : gain > 1 ? t("boostNote") : privateTab !== null ? t("privateNote") : "";
   }
   show();
 
@@ -89,7 +91,7 @@
       const g = queued;
       queued = null;
       try {
-        await tvcSave(site, "gain", g);
+        await tvcSet(site, "gain", g, privateTab);
       } catch (e) {
         // storage unavailable: the next move writes again
       }
@@ -126,11 +128,11 @@
     show();
     saveGain(1);
   });
-  normalizeEl.addEventListener("change", () => tvcSave(site, "normalize", normalizeEl.checked));
-  monoEl.addEventListener("change", () => tvcSave(site, "mono", monoEl.checked));
+  normalizeEl.addEventListener("change", () => tvcSet(site, "normalize", normalizeEl.checked, privateTab));
+  monoEl.addEventListener("change", () => tvcSet(site, "mono", monoEl.checked, privateTab));
   enabledEl.addEventListener("change", () => {
     show();
-    tvcSave(site, "enabled", enabledEl.checked);
+    tvcSet(site, "enabled", enabledEl.checked, privateTab);
   });
 
   // The keyboard shortcuts can change the volume while the popup is open: follow storage, but only when
@@ -144,7 +146,7 @@
     }
     stale = false;
     const read = ++reads;
-    const s = await tvcLoad(site);
+    const s = await tvcLoad(site, privateTab);
     if (read !== reads) return; // a newer read is on its way
     if (holding || writing) {
       stale = true; // the user got there first: look again once they are done
@@ -156,7 +158,8 @@
     show();
   }
   browser.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && tvcStorageKey(site) in changes) follow();
+    const key = tvcStorageKey(site);
+    if (area === "local" ? key in changes : area === "session" && privateTab !== null && tvcSessionPrefix(privateTab) + key in changes) follow();
   });
 
   // Peak meter: output level of the tab, read about 12 times per second, falls back smoothly.

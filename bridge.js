@@ -6,6 +6,19 @@
 (() => {
   let site = null;
   let settings = null;
+  // In a private window the tab's own settings are in storage.session, which pages cannot read:
+  // they come from the background script (hello) and, after each change, from a settings message.
+  const isPrivate = browser.extension.inIncognitoContext;
+  // Settings requests are numbered: an answer older than the settings already applied is dropped.
+  let asked = 0;
+  let applied = 0;
+
+  function apply(n, s) {
+    if (n < applied) return;
+    applied = n;
+    settings = s;
+    push();
+  }
 
   function push() {
     document.dispatchEvent(new CustomEvent("tab-volume-clean:settings", { detail: JSON.stringify(settings) }));
@@ -13,24 +26,36 @@
 
   const isDefault = (s) => s.gain === 1 && !s.normalize && !s.mono && s.enabled;
 
-  browser.runtime
-    .sendMessage({ type: "tab-volume-clean:hello" })
-    .then((r) => {
-      if (!r || !r.site) return;
-      site = r.site;
-      settings = r.settings;
-      if (!isDefault(settings)) push();
-    })
-    .catch(() => {});
+  function hello() {
+    const n = ++asked;
+    return browser.runtime
+      .sendMessage({ type: "tab-volume-clean:hello" })
+      .then((r) => {
+        if (!r || !r.site) return;
+        if (site === null) {
+          site = r.site;
+          if (isDefault(r.settings)) {
+            applied = n;
+            settings = r.settings; // nothing to process at the defaults
+            return;
+          }
+        }
+        apply(n, r.settings);
+      })
+      .catch(() => {});
+  }
+  hello();
 
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !site) return;
     const k = tvcKeys(site);
     if (!Object.values(k).some((key) => key in changes)) return;
-    tvcLoad(site).then((s) => {
-      settings = s;
-      push();
-    });
+    if (isPrivate) {
+      hello(); // the tab's own settings may override the saved ones
+      return;
+    }
+    const n = ++asked;
+    tvcLoad(site).then((s) => apply(n, s));
   });
 
   // Level meter: only the frame that processes audio answers, the others stay silent.
@@ -43,6 +68,11 @@
     }
   });
   browser.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === "tab-volume-clean:settings") {
+      // Private tab: settings changed in the popup or with a shortcut.
+      if (site && msg.site === site) apply(++asked, msg.settings);
+      return undefined;
+    }
     if (!msg || msg.type !== "tab-volume-clean:meter") return undefined;
     reply = null;
     document.dispatchEvent(new CustomEvent("tab-volume-clean:meter")); // hook.js answers synchronously

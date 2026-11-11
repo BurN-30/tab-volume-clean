@@ -3,6 +3,7 @@
 //   norm:<host>  true when Normalize is on
 //   mono:<host>  true when Mono is on
 //   off:<host>   true when the extension is turned off for the site
+// Private windows write nothing to storage.local (see tvcPrivateTab below).
 // Shared by the background script, the content bridge, the popup and the options page.
 "use strict";
 
@@ -29,10 +30,31 @@ function tvcKeys(site) {
   return k;
 }
 
-// Reads the settings of a site from storage.local, with the defaults for missing values.
-async function tvcLoad(site) {
+// ---------- Private windows ----------
+// storage.local is written to disk and outlives a private session. A setting changed in a private tab therefore
+// goes to storage.session instead (kept in memory only, cleared when the browser quits), under
+// "tab<id>|<key>": it applies to that tab and that site, and is removed when the tab closes.
+// A private tab starts from the settings saved for the site in normal windows; it never changes them.
+
+// The tab id when the tab is private, else null (normal tab, settings in storage.local).
+function tvcPrivateTab(tab) {
+  return tab && tab.incognito ? tab.id : null;
+}
+
+function tvcSessionPrefix(tabId) {
+  return "tab" + tabId + "|";
+}
+
+// Reads the settings of a site, with the defaults for missing values.
+// privateTab: tvcPrivateTab(tab); the private tab's own changes then take precedence over storage.local.
+async function tvcLoad(site, privateTab = null) {
   const k = tvcKeys(site);
   const o = await browser.storage.local.get(Object.values(k));
+  if (privateTab !== null) {
+    const p = tvcSessionPrefix(privateTab);
+    const own = await browser.storage.session.get(Object.values(k).map((key) => p + key));
+    for (const key of Object.values(k)) if (p + key in own) o[key] = own[p + key];
+  }
   return {
     gain: typeof o[k.gain] === "number" ? o[k.gain] : 1,
     normalize: o[k.normalize] === true,
@@ -42,8 +64,13 @@ async function tvcLoad(site) {
 }
 
 // Writes one setting; default values are removed instead of stored.
-function tvcSave(site, name, value) {
+// In a private tab the value goes to storage.session, explicitly (it may differ from the saved one).
+function tvcSave(site, name, value, privateTab = null) {
   const k = tvcKeys(site);
+  if (privateTab !== null) {
+    const key = tvcSessionPrefix(privateTab) + (name === "enabled" ? k.off : k[name]);
+    return browser.storage.session.set({ [key]: name === "gain" ? value : name === "enabled" ? !value : value === true });
+  }
   if (name === "gain") {
     return value === 1 ? browser.storage.local.remove(k.gain) : browser.storage.local.set({ [k.gain]: value });
   }
@@ -51,6 +78,23 @@ function tvcSave(site, name, value) {
     return value ? browser.storage.local.remove(k.off) : browser.storage.local.set({ [k.off]: true });
   }
   return value ? browser.storage.local.set({ [k[name]]: true }) : browser.storage.local.remove(k[name]);
+}
+
+// Pages cannot read storage.session: after a change in a private tab, its frames get the new settings
+// in a message. One message at a time, each read after the previous one is sent, so the last one wins.
+let tvcSendQueue = Promise.resolve();
+function tvcSendPrivate(site, privateTab) {
+  tvcSendQueue = tvcSendQueue
+    .then(() => tvcLoad(site, privateTab))
+    .then((settings) => browser.tabs.sendMessage(privateTab, { type: "tab-volume-clean:settings", site, settings }))
+    .catch(() => {}); // tab closed, or a page without the content scripts
+  return tvcSendQueue;
+}
+
+// Saves a setting changed by the user (popup, shortcut), and hands it to a private tab's frames.
+async function tvcSet(site, name, value, privateTab = null) {
+  await tvcSave(site, name, value, privateTab);
+  if (privateTab !== null) await tvcSendPrivate(site, privateTab);
 }
 
 function tvcPercent(gain) {

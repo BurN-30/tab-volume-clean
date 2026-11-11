@@ -16,6 +16,7 @@
   "monoHelp": { "message": "Mélanger gauche et droite dans les deux oreilles" },
   "mute": { "message": "Couper le son" },
   "unmute": { "message": "Rétablir le son" },
+  "privateNote": { "message": "Fenêtre privée : les réglages valent pour cet onglet seulement et ne sont pas enregistrés." },
   "meterIdle": { "message": "Niveau affiché quand le son de l'onglet est traité" },
   "cmdUp": { "message": "Monter le volume" },
   "cmdDown": { "message": "Baisser le volume" },

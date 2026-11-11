@@ -110,6 +110,8 @@ The tests never play sound. Firefox is started with a mock audio backend (`media
 - the shortcuts move the volume along the slider curve and mute the tab;
 - the per-site value is re-applied on reload;
 - the popup (slider curve and detent, % and dB, value announced to screen readers, options, mute, On switch, locale strings) and the options page work;
+- the real popup slider, dragged back and forth with the mouse while the tab plays: nothing else moves the slider while it is held, and once released the shown value, the stored value and the gain applied in the tab match; a change made elsewhere still moves the open popup;
+- slider position to gain and back: no drift over the whole travel;
 - at 0%, cross-origin media lowered through its volume stays silent when the page sets its volume again, an element started by `autoplay` inside a closed shadow root is captured, and a page node disconnected with `disconnect(0)` is not reconnected.
 
 `test/bench/compare.mjs` compares the chain with a plain linear gain on a speech-like signal: the level difference is 0.00 dB wherever the plain gain does not clip.

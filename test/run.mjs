@@ -8,11 +8,13 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import puppeteer from 'puppeteer-core';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const FIREFOX = process.env.FIREFOX || 'C:/Program Files/Mozilla Firefox/firefox.exe';
 const EXT_ID = 'tab-volume-clean@burn-30';
+const EXT_UUID = '0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0'; // fixed moz-extension:// address of the test copy
 const EXT_FILES = ['manifest.json', 'common.js', 'background.js', 'bridge.js', 'hook.js', 'popup.html', 'popup.css', 'popup.js', 'options.html', 'options.css', 'options.js'];
 
 function toneWav(freq = 440, amp = 0.1, sec = 4, sr = 48000) {
@@ -69,6 +71,25 @@ window.browser = {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     return res.end(html);
   }
+  if (file === '/popup-frame.html') {
+    // The real popup of the test copy in a frame: WebDriver does not send the mouse to a moz-extension:// tab,
+    // but it does to a frame. The frame reports to this page every write into the slider (see popup-probe.js).
+    const match = new URL(req.url, 'http://x').searchParams.get('match');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    return res.end(`<!doctype html><body style="margin:0">
+<iframe id="p" style="border:0;width:340px;height:330px" src="moz-extension://${EXT_UUID}/popup.html?match=${encodeURIComponent(match)}"></iframe>
+<script>
+window.log = [];
+const waiting = new Map();
+let n = 0;
+addEventListener('message', (e) => {
+  if (!e.data || !e.data.tvc) return;
+  if (e.data.kind === 'state') { const f = waiting.get(e.data.id); waiting.delete(e.data.id); if (f) f(e.data); return; }
+  log.push(e.data);
+});
+window.ask = () => new Promise((resolve) => { const id = ++n; waiting.set(id, resolve); document.getElementById('p').contentWindow.postMessage({ ask: 'state', id }, '*'); });
+</script></body>`);
+  }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
   res.end(fs.readFileSync(path.join(ROOT, 'test', 'page.html')));
 });
@@ -92,6 +113,7 @@ const browser = await puppeteer.launch({
     'media.autoplay.block-webaudio': false,
     'media.peerconnection.ice.obfuscate_host_addresses': false,
     'media.peerconnection.ice.loopback': true,
+    'extensions.webextensions.uuids': JSON.stringify({ [EXT_ID]: EXT_UUID }),
   },
 });
 
@@ -131,7 +153,73 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
     .then((r) => document.dispatchEvent(new CustomEvent('tab-volume-clean:test-meter-reply', { detail: JSON.stringify(r === undefined ? null : r) })));
 });
 `);
+  // The popup of the test copy can be loaded in a frame of the test pages (http://localhost) and finds its tab by
+  // address (?match=): in a frame, Firefox gives the extension page no browser.tabs, so the background relays it.
+  // popup-probe.js reports each write into the slider and whether the user is holding it.
+  const manifest = JSON.parse(fs.readFileSync(path.join(copy, 'manifest.json'), 'utf8'));
+  manifest.web_accessible_resources = [{ resources: ['*'], matches: ['http://localhost/*'] }];
+  fs.writeFileSync(path.join(copy, 'manifest.json'), JSON.stringify(manifest, null, 2));
+  const popupSrc = fs.readFileSync(path.join(copy, 'popup.js'), 'utf8');
+  fs.writeFileSync(path.join(copy, 'popup.js'), popupSrc
+    .replace('browser.tabs.query({ active: true, currentWindow: true })', 'tvcTabs.query({ url: new URLSearchParams(location.search).get("match") })')
+    .replaceAll('browser.tabs.', 'tvcTabs.'));
+  fs.writeFileSync(path.join(copy, 'popup.html'), fs.readFileSync(path.join(copy, 'popup.html'), 'utf8')
+    .replace('<script src="common.js">', '<script src="popup-probe.js"></script> <script src="common.js">'));
+  fs.writeFileSync(path.join(copy, 'popup-probe.js'), `
+window.tvcTabs = {
+  query: (arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'query', arg }),
+  update: (id, arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'update', id, arg }),
+  sendMessage: (id, arg) => browser.runtime.sendMessage({ type: 'tab-volume-clean:test-tabs', op: 'send', id, arg }).then((x) => x && x.r),
+};
+(() => {
+  const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  let held = false;
+  const send = (m) => parent.postMessage({ tvc: true, ...m }, '*');
+  Object.defineProperty(HTMLInputElement.prototype, 'value', {
+    configurable: true,
+    get() { return d.get.call(this); },
+    set(v) {
+      if (this.id === 'slider') send({ kind: 'set', from: d.get.call(this), to: String(v), held });
+      d.set.call(this, v);
+    },
+  });
+  document.addEventListener('pointerdown', () => (held = true), true);
+  document.addEventListener('pointerup', () => (held = false), true);
+  document.addEventListener('input', (e) => send({ kind: 'input', value: d.get.call(e.target), text: document.getElementById('value').textContent }), true);
+  addEventListener('message', (e) => {
+    if (!e.data || e.data.ask !== 'state') return;
+    const s = document.getElementById('slider');
+    const r = s.getBoundingClientRect();
+    send({ kind: 'state', id: e.data.id, value: d.get.call(s), text: document.getElementById('value').textContent,
+      site: document.getElementById('site').textContent, rect: { x: r.x, y: r.y, w: r.width, h: r.height } });
+  });
+})();
+`);
+  fs.appendFileSync(path.join(copy, 'background.js'), `
+browser.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.type !== 'tab-volume-clean:test-tabs') return undefined;
+  if (msg.op === 'query') return browser.tabs.query(msg.arg);
+  if (msg.op === 'update') return browser.tabs.update(msg.id, msg.arg);
+  if (msg.op === 'send') return browser.tabs.sendMessage(msg.id, msg.arg).then((r) => ({ r }));
+  return undefined;
+});
+`);
   console.log('extension installed:', await browser.installExtension(copy));
+
+  // ---------- Slider position <-> gain: exact round trip over the whole travel ----------
+  const conv = {};
+  vm.createContext(conv);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'common.js'), 'utf8'), conv);
+  const detent = Math.round(conv.tvcGainToPosition(1));
+  const drift = [];
+  for (let p = 0; p <= 100; p++) {
+    let q = p;
+    for (let i = 0; i < 50; i++) q = Math.round(conv.tvcGainToPosition(conv.tvcPositionToGain(q)));
+    const g = conv.tvcPositionToGain(p);
+    const want = Math.abs(p - detent) <= 1 ? detent : p;
+    if (q !== want || conv.tvcPositionToGain(Math.round(conv.tvcGainToPosition(g))) !== g) drift.push(p);
+  }
+  check(drift.length === 0, `slider position -> gain -> position, 50 round trips on each of the 101 positions: no drift${drift.length ? ' (drift at ' + drift.join(', ') + ')' : ''}`);
 
   const page = await browser.newPage();
   page.on('console', (m) => console.log('[page]', m.text()));
@@ -257,6 +345,51 @@ document.addEventListener('tab-volume-clean:test-meter', () => {
   const back100 = await page2.evaluate(() => extSet(100));
   check(Object.keys(back100.store).length === 0, 'back to 100%: nothing stored');
   check(back100.badge === '', `toolbar badge cleared at 100%: "${back100.badge}"`);
+
+  // ---------- Dragging the real popup slider (real storage, real echoes, tab playing) ----------
+  // Each move writes the volume; storage.onChanged then comes back to the popup. Those echoes used to put the
+  // held slider back on older values: the shown value jumped back and forth while the bar moved smoothly.
+  const frame = await browser.newPage();
+  await frame.goto(`http://localhost:${crossPort}/popup-frame.html?match=${encodeURIComponent('*://127.0.0.1/*')}`);
+  await wait(1500);
+  const st0 = await frame.evaluate(() => ask());
+  const fr = await frame.evaluate(() => { const r = document.getElementById('p').getBoundingClientRect(); return { x: r.x, y: r.y }; });
+  const sy = fr.y + st0.rect.y + st0.rect.h / 2;
+  const sx = (f) => fr.x + st0.rect.x + st0.rect.w * (0.03 + 0.94 * f);
+  let cur = Number(st0.value) / 100;
+  await frame.mouse.move(sx(cur), sy);
+  await frame.mouse.down();
+  for (const target of [0.95, 0.15, 0.85, 0.35, 0.99, 0.05, 0.7, 0.5]) {
+    const from = cur;
+    for (let i = 1; i <= 30; i++) await frame.mouse.move(sx(from + ((target - from) * i) / 30), sy);
+    cur = target;
+  }
+  await wait(1500); // pointer still, button held: late echoes must not move the slider either
+  const held = await frame.evaluate(() => ask());
+  await frame.mouse.up();
+  await wait(1000);
+  const fin = await frame.evaluate(() => ask());
+  const flog = await frame.evaluate(() => log);
+  const inputs = flog.filter((e) => e.kind === 'input');
+  const moved = flog.filter((e) => e.kind === 'set' && e.held && e.from !== e.to);
+  check(st0.site === '127.0.0.1' && inputs.length > 100 && moved.length === 0,
+    `real popup, slider dragged back and forth (${inputs.length} input events): nothing moves the held slider (${moved.length} writes${moved.length ? ', e.g. ' + moved.slice(0, 4).map((e) => e.from + ' -> ' + e.to).join(', ') : ''})`);
+  const wantText = conv.tvcPercentText(conv.tvcPositionToGain(Number(fin.value)));
+  check(held.value === fin.value && held.text === fin.text && fin.text === wantText,
+    `pointer at rest: the popup shows the value under the pointer (${held.text} held, ${fin.text} released, position ${fin.value} = ${wantText})`);
+  const afterDrag = await page.evaluate(() => extSet('command', 'none'));
+  const engineGain = await page.evaluate(async () => (await probe()).gain);
+  const wantGain = conv.tvcPositionToGain(Number(fin.value));
+  check(afterDrag.store['site:127.0.0.1'] === wantGain && engineGain === wantGain,
+    `after the drag, storage (${afterDrag.store['site:127.0.0.1']}) and the gain applied in the tab (${engineGain}) match the slider (${wantGain})`);
+  // A change made elsewhere (keyboard shortcut, another window) while the slider is not held: the popup follows.
+  await page.evaluate(() => extSet(200));
+  await wait(300);
+  const followed = await frame.evaluate(() => ask());
+  check(followed.text === '200%' && followed.value === String(Math.round(conv.tvcGainToPosition(2))),
+    `slider released: a change made elsewhere still moves the open popup (${fin.text} -> ${followed.text}, position ${followed.value})`);
+  await frame.close();
+  await setPercent(100);
 
   const ui = await browser.newPage();
   await ui.goto(`http://127.0.0.1:${port}/popup-test.html`);

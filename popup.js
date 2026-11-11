@@ -72,16 +72,59 @@
   }
   show();
 
+  // While the user moves the slider, the popup is the only source of truth for the volume.
+  // A drag fires dozens of input events per second and each one used to be written to storage at once:
+  // the writes queued up, their storage.onChanged echoes came back late and out of step with the pointer,
+  // and the listener below put the slider back on those old values (the value jumped back and forth).
+  // Now there is at most one write in flight, the latest value waiting behind it, and the slider
+  // never follows storage while it is held or while the popup's own writes are pending.
+  let holding = false;
+  let writing = false;
+  let queued = null; // gain waiting for the write in flight
+  let stale = false; // storage changed while the popup could not follow it
+
+  async function flush() {
+    writing = true;
+    while (queued !== null) {
+      const g = queued;
+      queued = null;
+      try {
+        await tvcSave(site, "gain", g);
+      } catch (e) {
+        // storage unavailable: the next move writes again
+      }
+    }
+    writing = false;
+    if (stale) follow();
+  }
+  function saveGain(g) {
+    queued = g;
+    if (!writing) flush();
+  }
+
+  slider.addEventListener("pointerdown", () => {
+    holding = true;
+  });
+  const release = () => {
+    if (!holding) return;
+    holding = false;
+    if (stale) follow();
+  };
+  slider.addEventListener("change", release);
+  window.addEventListener("pointerup", release);
+  window.addEventListener("pointercancel", release);
+  window.addEventListener("blur", release);
+
   slider.addEventListener("input", () => {
     gain = tvcPositionToGain(Number(slider.value)); // small detent at 100%
     show();
-    tvcSave(site, "gain", gain);
+    saveGain(gain);
   });
   reset.addEventListener("click", () => {
     gain = 1;
     slider.value = String(Math.round(tvcGainToPosition(1)));
     show();
-    tvcSave(site, "gain", 1);
+    saveGain(1);
   });
   normalizeEl.addEventListener("change", () => tvcSave(site, "normalize", normalizeEl.checked));
   monoEl.addEventListener("change", () => tvcSave(site, "mono", monoEl.checked));
@@ -90,14 +133,30 @@
     tvcSave(site, "enabled", enabledEl.checked);
   });
 
-  // The keyboard shortcuts can change the volume while the popup is open: follow storage.
-  browser.storage.onChanged.addListener((changes, area) => {
-    const key = tvcStorageKey(site);
-    if (area !== "local" || !(key in changes)) return;
-    const v = changes[key].newValue;
-    gain = typeof v === "number" ? v : 1;
+  // The keyboard shortcuts can change the volume while the popup is open: follow storage, but only when
+  // the user is not moving the slider and no write of the popup is pending. The value is read back from
+  // storage (the latest one) rather than taken from the event, which may be an echo of an older write.
+  let reads = 0;
+  async function follow() {
+    if (holding || writing) {
+      stale = true;
+      return;
+    }
+    stale = false;
+    const read = ++reads;
+    const s = await tvcLoad(site);
+    if (read !== reads) return; // a newer read is on its way
+    if (holding || writing) {
+      stale = true; // the user got there first: look again once they are done
+      return;
+    }
+    if (s.gain === gain) return; // nothing new (echo of the popup's own last write)
+    gain = s.gain;
     slider.value = String(Math.round(tvcGainToPosition(gain)));
     show();
+  }
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && tvcStorageKey(site) in changes) follow();
   });
 
   // Peak meter: output level of the tab, read about 12 times per second, falls back smoothly.
